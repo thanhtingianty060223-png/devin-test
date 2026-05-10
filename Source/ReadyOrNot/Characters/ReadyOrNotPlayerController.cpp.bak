@@ -1,0 +1,6174 @@
+// Copyright Void Interactive, 2023
+
+#include "ReadyOrNotPlayerController.h"
+#include "ReadyOrNot.h"
+
+#include "Engine/DemoNetDriver.h"
+#include "Net/UnrealNetwork.h"
+#include "OnlineStats.h"
+#include <OnlineSubsystem.h>
+
+#include "ReadyOrNotGameInstance.h"
+#include "ReadyOrNotGameMode.h"
+#include "ReadyOrNotGameSession.h"
+
+#include "Blueprint/UserWidget.h"
+#include "Blueprint/WidgetBlueprintLibrary.h"
+
+#include "Actors/Gameplay/ReadyOrNotPlayerState.h"
+#include "Actors/Items/DoorRam.h"
+#include "Actors/Items/Optiwand.h"
+#include "Actors/BaseWeapon.h"
+#include "Actors/BaseArmour.h"
+#include "Actors/Voting/Referendum.h"
+#include "Actors/Voting/MapReferendum.h"
+#include "Actors/Voting/PlayerReferendum.h"
+
+#include "Characters/SpectatePawn.h"
+#include "Characters/AI/SWATCharacter.h"
+#include "Characters/CyberneticController.h"
+
+#include "HUD/Widgets/HumanCharacterHUD_V2.h"
+#include "HUD/Widgets/LoadingScreen.h"
+#include "HUD/Widgets/MessageDisplayBox.h"
+
+#include "GameModes/CoopGS.h"
+#include "GameModes/CoopGM.h"
+#include "GameModes/VIPEscortGM.h"
+
+#include "GameFramework/SpectatorPawn.h"
+
+#include "Info/Activities/MoveActivity.h"
+
+#include "lib/DataSingleton.h"
+
+#include "Components/SkinComponent.h"
+#include "Components/CharacterHealthComponent.h"
+
+#include "NavigationSystem.h"
+
+#include "FMODAmbientSound.h"
+#include "JoinSessionCallbackProxyAdvanced.h"
+#include "ReadyOrNotCharacter.h"
+#include "Actors/Door.h"
+#include "Actors/DynamicWorldActor.h"
+#include "Actors/DynamicWorldItem.h"
+#include "Actors/Gameplay/EvidenceActor.h"
+#include "Components/BleedComponent.h"
+#include "Engine/LODActor.h"
+#include "HUD/Widgets/PreMissionPlanning.h"
+#include "Info/SwatAutomationManager.h"
+#include "Interfaces/GatherDebugText.h"
+#include "lib/ReadyOrNotFunctionLibrary.h"
+#include "Components/HierarchicalInstancedStaticMeshComponent.h"
+#if defined(WITH_STEAM)
+#include "OnlinePresenceInterfaceSteam.h"
+#endif
+#include "OnlineSubsystemSessionSettings.h"
+
+#include "ShaderPipelineCache.h"
+#include "Actors/Gameplay/IncapacitatedHuman.h"
+#include "Actors/Gameplay/TrapActor.h"
+#include "AI/SuspectCharacter.h"
+#include "Components/GibComponent.h"
+#include "Components/PlayerPostProcessing.h"
+#include "Components/RichTextBlock.h"
+#include "GameModes/LobbyGM.h"
+#include "GameModes/LobbyGS.h"
+#include "GameModes/MainMenuGM.h"
+#include "Info/ReadyOrNotBackend.h"
+#include "GameModes/DefusalGM.h"
+#include "HUD/Widgets/MenuWidget.h"
+#include "ReadyOrNotPlayerCameraManager.h"
+#include "Info/MissionPlanManager.h"
+#include "CommonInputSubsystem.h"
+#include "UASAimAssistComponent.h"
+#include "Actors/Environment/MissionPortal.h"
+#include "Commander/RosterManager.h"
+#include "Commander/RosterSelectionWidget.h"
+#include "GameModes/TrainingGM.h"
+#include "HUD/Widgets/CollectableWidget.h"
+#include "HUD/Widgets/MissionEnd.h"
+#include "HUD/Widgets/PauseMenu_Wrapper.h"
+#include "Info/LoadoutManager.h"
+#include "Info/Activities/SuspectCombatActivity.h"
+
+#if defined(WITH_ACHIEVEMENTS_V1)
+#include "Subsystems/AchievementSubsystem.h"
+#endif
+
+#if defined(TARGET_CONSOLE)
+#include "lib/ReadyOrNotConsoleFunctionLibrary.h"
+#endif
+
+#if defined(TARGET_CONSOLE)
+#include "Subsystems/ConsoleMultiplayerSubsystem.h"
+#endif
+
+#if defined(TARGET_PS5)
+#include "Subsystems/PS5ActivitiesSubsystem.h"
+#include "SonyApplication.h"
+#include "SonyInputInterface.h"
+#endif
+
+TAutoConsoleVariable<int32> CVarRonFollowActiveShooter(TEXT("a.RonFollowActiveShooter"), 0, TEXT("Follow the active shooter"));
+TAutoConsoleVariable<int32> CVarRonFollowActiveShooterGunCam(TEXT("a.RonFollowActiveShooterGunCam"), 0, TEXT("Follow the active shooter (Gun Cam)"));
+TAutoConsoleVariable<int32> CVarRonShowHudOverlay(TEXT("a.RonShowOverlayHud"), 1, TEXT("Show the overlay on the HUD, which shows build number and other info"));
+
+#define  ACH_FIRST_ARREST TEXT("ACH_FIRST_ARREST")
+
+const FString AReadyOrNotPlayerController::MENU_PRE_MISSION_PLANNING = "PreMissionPlanning";
+
+void AReadyOrNotPlayerController::UpdateRichPresence(FString MapName)
+{
+	FOnlineKeyValuePairs<FString, FVariantData> Keys;
+	FString MissionName = UBpGameplayHelperLib::GetMapDetailsFromName(MapName).FriendlyLevelName.ToString();
+	if (!MissionName.IsEmpty())
+	{
+		Keys.Add("mission", FVariantData(FString(*MissionName)));
+	}
+
+	FString StatusStr = "Playing Ready Or Not";
+	if (MapName.Contains("MainMenu"))
+	{
+		Keys.Add("steam_display", FVariantData(FString(TEXT("#Status_AtMainMenu"))));
+		StatusStr = "At the Main Menu";
+	} else if (MapName.Contains("RON_STATION_CORE"))
+	{
+		Keys.Add("steam_display", FVariantData(FString(TEXT("#Status_Custom"))));
+		StatusStr = "Los Suenos Police Headquarters";
+		Keys.Add("custom", FVariantData(FString(*StatusStr)));
+	} else
+	{
+		Keys.Add("steam_display", FVariantData(FString(TEXT("#Status_InMission"))));
+		if (!MissionName.IsEmpty())
+		{
+			StatusStr = FString::Printf(TEXT("In A Mission [%s]"), *MissionName);
+		}
+	}
+	UReadyOrNotStatics::GetReadyOrNotGameInstance()->SetPresenceForLocalPlayers(StatusStr, Keys);
+}
+
+void AReadyOrNotPlayerController::OnUnPossess()
+{
+	APlayerCharacter* PlayerCharacter = Cast<APlayerCharacter>(GetPawn());
+	if (PlayerCharacter && PlayerCharacter->GetPlayerPostProcessing())
+	{
+		PlayerCharacter->GetPlayerPostProcessing()->StopPostProcessEffect_Name("NVG");
+	}
+	Super::OnUnPossess();
+}
+
+AReadyOrNotPlayerController::AReadyOrNotPlayerController()
+{
+	PrimaryActorTick.bTickEvenWhenPaused = true;
+	bShouldPerformFullTickWhenPaused = true;
+	bCanPossessWithoutAuthority = true;
+
+	ProgressionComp = CreateDefaultSubobject<UProgressionComponent>(TEXT("ProgressionComp"));
+
+	PlayerCameraManagerClass = AReadyOrNotPlayerCameraManager::StaticClass();
+}
+
+void AReadyOrNotPlayerController::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME(AReadyOrNotPlayerController, ReplicatedMapList);
+	// ##UE5UPGRADE## Zeus
+	// DOREPLIFETIME(AReadyOrNotPlayerController, Rep_MatchmakingServerInfo);
+	// DOREPLIFETIME(AReadyOrNotPlayerController, Rep_MatchmakingPartyInit);
+	DOREPLIFETIME(AReadyOrNotPlayerController, MyVoteData);
+	DOREPLIFETIME(AReadyOrNotPlayerController, ServerSideChecksum);
+}
+
+void AReadyOrNotPlayerController::BeginPlay()
+{
+	Super::BeginPlay();
+#ifdef SUPPORTER_ONLY_BUILD
+	if (!UGameFeatureLibrary::IsGameVersionEnabled(DLC_SUPPORTER))
+	{
+		if (!GetWorld()->GetMapName().Contains("MainMenu"))
+		{
+			ClientReturnToMainMenuWithTextReason(FText());
+			return;
+		}
+	}
+#endif
+
+	SetupSubtitles();
+	
+	ConsoleCommand("net.UseAdaptiveNetUpdateFrequency 0");
+	// PSO Cache
+	// https://docs.unrealengine.com/5.0/en-US/optimizing-rendering-with-pso-caches-in-unreal-engine/
+
+	// Shady: Disabled for now - likely cause of performance issues
+	// ConsoleCommand("r.ShaderPipelineCache.Enabled 1");
+	// ConsoleCommand("r.RayTracing.NonBlockingPipelineCreation 1");
+	// ConsoleCommand("r.RayTracing.Reflections.ExperimentalDeferred 1");
+	// ConsoleCommand("r.AmbientOcclusion.Compute 1");
+
+	UReadyOrNotStatics::GetReadyOrNotGameInstance()->RetryLogin();
+	if (IsLocalController())
+	{
+		
+		if (ServerSideChecksum != UReadyOrNotStatics::GetReadyOrNotGameInstance()->Checksum)
+		{
+			Server_SetChecksum(	UReadyOrNotStatics::GetReadyOrNotGameInstance()->Checksum);
+		}
+	}
+
+
+	UVOIPStatics::SetMicThreshold(-1.0f);
+	ConsoleCommand("voice.MicNoiseReleaseTime 1100");
+	ConsoleCommand("voice.MicNoiseAttackTime 0");
+	ConsoleCommand("voice.MicNoiseGateThreshold 0.0");
+	ConsoleCommand("voice.JitterBufferDelay 0.5");
+#if UE_BUILD_SHIPPING && ENABLE_ANTI_PIRACY_CHECKS && PLATFORM_WINDOWS
+	IOnlineSubsystem* OnlineSub = IOnlineSubsystem::Get();
+	if (OnlineSub)
+	{
+		if ( (FCString::Atoi(*OnlineSub->GetAppId()) != 420410 * 2 && FCString::Atoi(*OnlineSub->GetAppId()) != 572100 * 2) || FCString::Atoi(*OnlineSub->GetAppId()) == 120 * 4)
+		{
+			AActor* MyNullPtr = nullptr;
+			MyNullPtr->SetActorLocation(FVector::ZeroVector);
+		}
+		
+	}
+#endif
+
+	UpdateRichPresence(GetWorld()->GetMapName());
+	ConsoleCommand("a.PlayerCharacter.PelvisFPMovementDamping .38");
+	ConsoleCommand("a.PlayerCharacter.PelvisFPMovementBob.Enable 1");
+	
+	ACoopGS* gs = Cast<ACoopGS>(GetWorld()->GetGameState());
+	if(gs&&gs->MatchState==EMatchState::MS_Playing)
+	{
+		bStartedCoopAsSpectator = true;
+		PlayerCameraManager->StartCameraFade(1,1,0.1,FLinearColor(0,0,0),false,true);
+       	Server_StartSpectating();
+	}
+	else
+	{
+		bStartedCoopAsSpectator = false;
+	}
+	
+	
+	
+#if !WITH_EDITOR
+	ConsoleCommand("DisableAllScreenMessages");
+#endif
+#ifdef NO_DRAW_DEBUG
+	ConsoleCommand("a.DisableAllVisualDebug 1");
+#endif
+	if (GEngine->GameUserSettings)
+	{
+		FString ViewDistanceQuality = "sg.ViewDistanceQuality " + FString::FromInt(FMath::Clamp(GEngine->GameUserSettings->ScalabilityQuality.ViewDistanceQuality, 2, 4));
+		ConsoleCommand(ViewDistanceQuality);
+		// may resolve a hitch by forcing shadow quality off and on?
+		ConsoleCommand("sg.ShadowQuality 0");
+		FString ShadowQuality = "sg.ShadowQuality " + FString::FromInt(FMath::Clamp(GEngine->GameUserSettings->ScalabilityQuality.ShadowQuality, 0, 4));
+		ConsoleCommand(ShadowQuality);
+	}
+//	ClientRequestSteamAuth();
+
+	RecreateOverlays();
+
+	//GetWorld()->GetTimerManager().SetTimer(TriggerInvalidateWidgets_Handle, this, &AReadyOrNotPlayerController::TriggerInvalidateWidgets, 1.0f, true, 1.0f);
+
+	ConsoleCommand("r.OneFrameThreadLag 1");
+
+#if defined(TARGET_CONSOLE)
+	UReadyOrNotConsoleFunctionLibrary::ConsoleApplyLevelSpecificSettings("", false);
+#else
+	UReadyOrNotGameUserSettings* Settings = Cast<UReadyOrNotGameUserSettings>(UBpVideoSettingsLib::GetGameUserSettings());
+	if (Settings)
+	{
+		Settings->ApplyCommandLineOverrides();
+	}
+#endif
+
+	ConsoleCommand("r.Shadow.CSM.MaxCascades 1");
+	
+#if WITH_EDITOR
+// Fixes a bug where only the server (or client 1) gets the appropriate resolution settings
+	const ULevelEditorPlaySettings* PlayInSettings = GetDefault<ULevelEditorPlaySettings>();
+	int32 resX = PlayInSettings->NewWindowWidth;
+	int32 resY = PlayInSettings->NewWindowHeight;
+	FString resCommand = "r.setres " + FString::SanitizeFloat(resX) + "x" + FString::SanitizeFloat(resY);
+	ConsoleCommand(resCommand);
+#endif
+
+	//Force depth of field off! it doesn't work with fov shader
+	//Fixes Bug #98553 Clients gun vision becomes blurry when aiming down sight
+	ConsoleCommand("r.DepthOfFieldQuality 0");
+
+	//Fix for Bug #98470 where brightness changes significantly based on post process quality settings
+	ConsoleCommand("r.EyeAdaptationQuality 4", false);
+
+	ConsoleCommand("r.RenderTargetPoolMin 2000");
+
+#if defined RTX_DMO
+	UReadyOrNotGameUserSettings* us = Cast<UReadyOrNotGameUserSettings>(GEngine->GetGameUserSettings());
+	if (us)
+	{
+		bRTXDMOOn = us->bRayTracingEnabled;
+		OnRTXDMOChanged.Broadcast(bRTXDMOOn);
+	}
+#endif
+
+#if defined(TARGET_CONSOLE)
+	UpdateMouseCursorVisibility();
+#endif
+
+//#if defined(WITH_ACHIEVEMENTS_V1)	
+//	UAchievementSubsystem* AchievementsSubsystem = UReadyOrNotStatics::GetReadyOrNotGameInstance()->GetSubsystem<UAchievementSubsystem>();
+//	if (AchievementsSubsystem)
+//		AchievementsSubsystem->LateInitialize(); // need to have user ready before doing the initialization
+//#endif
+
+
+	LoadAimAssistIntensity();
+	SetActiveAimAssistConfig(GetAimAssistConfigByIntensity(AimAssistIntensity, false));
+	
+}
+
+void AReadyOrNotPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	Super::EndPlay(EndPlayReason);
+//	CancelSteamAuthForPlayerController();
+}
+
+
+void AReadyOrNotPlayerController::Server_SetHasFinishedLoading_Implementation()
+{
+	GetReadyOrNotPlayerState()->bHasFinishedLoading = true;
+}
+
+bool AReadyOrNotPlayerController::Server_SetHasFinishedLoading_Validate()
+{
+	return true;
+}
+
+FKey AReadyOrNotPlayerController::GetInputKey(FName InputName)
+{
+	UInputSettings* Settings = const_cast<UInputSettings*>(GetDefault<UInputSettings>());
+	const TArray<FInputActionKeyMapping>& Axes = Settings->GetActionMappings();
+
+	for (const FInputActionKeyMapping& Mapping : Axes)
+	{
+		if (Mapping.ActionName == InputName)
+		{
+			return Mapping.Key;
+		}
+	}
+	return FKey();
+}
+
+void AReadyOrNotPlayerController::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+	
+	SetPiratedTrue();
+
+	APlayerCharacter* PlayerCharacter = Cast<APlayerCharacter>(GetPawn());
+	if (PlayerCharacter)
+	{
+		
+#if defined(TARGET_PS5)
+		// dualsense gyro aiming prototype
+		if (!bWasAimingLastFrame && PlayerCharacter->bAiming)
+		{
+			bWasAimingLastFrame = true;
+
+			FSonyApplication* SonyApp = FSonyApplication::GetSonyApplication();
+			FSonyInputInterface* Interface = reinterpret_cast<FSonyInputInterface*>(SonyApp->GetInputInterface());
+			Interface->ResetControllerOrientation(0);
+		}
+
+		FVector Tilt;
+		FVector RotationRate;
+		FVector Acceleration;
+		FVector Gravity;
+
+		GetInputMotionState(Tilt, RotationRate, Acceleration, Gravity);
+		Tilt.Z = -Tilt.Z;
+		Tilt.Y = -Tilt.Y;
+#endif
+
+		// Clamp the control rotation only in PlayerCharacter
+		FRotator ClampedControlRotation = GetControlRotation();
+		ClampedControlRotation.Normalize();
+		ClampedControlRotation.Pitch = FMath::Clamp(ClampedControlRotation.Pitch, -72.0f, 80.0f);
+
+#if defined(TARGET_PS5)
+		if (PlayerCharacter->bAiming)
+		{
+			FVector Offset;
+			Offset.Z = FMath::Clamp(Tilt.Z, -30.0f, 30.0f) / 3.0f;
+			Offset.X = FMath::Clamp(Tilt.X, -30.0f, 30.0f) / 3.0f;
+			
+			UE_LOG(LogReadyOrNot, Log, TEXT("Adjusting pitch: %f"), Offset.Z);
+			UE_LOG(LogReadyOrNot, Log, TEXT("Adjusting yaw: %f"), Offset.X);
+
+			ClampedControlRotation.Add(-PreviousTiltOffset.Z, -PreviousTiltOffset.X, 0.0);
+			ClampedControlRotation.Add(Offset.Z, Offset.X, 0.0);
+			PreviousTiltOffset = Offset;
+		}
+		else
+		{
+			PreviousTiltOffset = FVector(0,0,0);
+			bWasAimingLastFrame = false;
+		}
+#endif
+
+		SetControlRotation(ClampedControlRotation);
+		
+		if (PlayerCharacter->IsMoving())
+		{
+			SecondsSinceLastMovement = 0.0f;
+		}
+		else
+		{
+			SecondsSinceLastMovement += GetWorld()->GetDeltaSeconds();
+		}
+	}
+
+	if (WidgetStack.Num() > 0)
+	{
+		if (FShaderPipelineCache::IsBatchingPaused())
+		{
+			FShaderPipelineCache::ResumeBatching();
+		}
+			
+	}
+	else
+	{
+		if (!FShaderPipelineCache::IsBatchingPaused())
+		{
+			FShaderPipelineCache::PauseBatching();
+		}
+	}
+
+	if (bStatsProfiledQueued)
+	{
+		if (WidgetStack.Num() == 0)
+		{
+			UReadyOrNotStatics::GetReadyOrNotGameInstance()->ReadyOrNotBackend->StartCapturingProfile();
+			bStatsProfiledQueued = false;
+		}
+	}
+
+	if (HasAuthority())
+	{
+		bool bDoChecksum;
+		UBpGameplayHelperLib::LoadServersideChecksum(bDoChecksum);
+#if UE_SERVER
+		bDoChecksum = false;
+#endif
+		if (bDoChecksum)
+		{
+			if (ServerSideChecksum != 0)
+			{
+				if (ServerSideChecksum != UReadyOrNotStatics::GetReadyOrNotGameInstance()->Checksum)
+				{
+					if (!bStartedChecksumKick)
+					{
+						bStartedChecksumKick = true;
+						ClientWasKicked(FText::FromString(XorString("You have been kicked: Pak Checksum mismatch (server requires you to be running the same mods)")));
+					}
+				}
+			}
+		}
+	}
+
+	UReadyOrNotGameInstance* Gi = UReadyOrNotStatics::GetReadyOrNotGameInstance();
+	float MicInputGain;
+	UBpGameplayHelperLib::GetMicInputGain(MicInputGain);
+	if (LastSetMicInputGain != MicInputGain)
+	{
+		LastSetMicInputGain = MicInputGain;
+		Gi->SetInputVolume(MicInputGain);
+	}
+
+	float NA, VOIPVolume;
+	UBpGameplayHelperLib::GetVolumes(NA, NA, NA, NA, VOIPVolume);
+	if (LastSetVOIPVolume != VOIPVolume)
+	{
+		LastSetVOIPVolume = VOIPVolume;
+		Gi->SetOutputVolume(VOIPVolume);
+	}
+
+	if (IsLocalController())
+	{
+		UReadyOrNotStatics::GetReadyOrNotGameInstance()->Update3DPosition(GetPawnOrSpectator());
+		if (UReadyOrNotStatics::GetReadyOrNotGameInstance()->bPendingRemoveLoadingScreenAfterHostLoaded)
+		{
+			RemoveLoadingScreen();
+		}
+
+		if (GetReadyOrNotPlayerState())
+		{
+			if (UReadyOrNotStatics::GetReadyOrNotGameInstance()->bClientHasFinishedLoading
+				&& !GetReadyOrNotPlayerState()->bHasFinishedLoading)
+			{
+				Server_SetHasFinishedLoading();
+			}
+		}
+
+	}
+
+	/*
+	if (GetReadyOrNotPlayerState())
+	{
+		if (HasAuthority() && IsLocalController())
+		{
+			GetReadyOrNotPlayerState()->bSquadLeader = true;
+		} else
+		{
+			GetReadyOrNotPlayerState()->bSquadLeader = false;
+		}
+	}
+	*/
+
+	#if !UE_BUILD_SHIPPING
+	if (CVarRonFollowActiveShooter.GetValueOnAnyThread() == 1 || CVarRonFollowActiveShooterGunCam.GetValueOnAnyThread() == 1)
+	{
+		if (!SpectateCamera)
+		{
+			SpectateCamera = GetWorld()->SpawnActor<ACameraActor>();
+		}
+		else
+		{
+			for (TActorIterator<ADoor>It(GetWorld()); It; ++It)
+			{
+				It->PrimaryActorTick.TickInterval = 0.0f;
+			}
+			
+			for (TObjectIterator<USuspectCombatActivity> It; It; ++It)
+			{
+				if (It && It->GetCharacter() && It->GetOwningController()->IsPerformingCustomAction("ActiveShooter"))
+				{
+					SetViewTarget(SpectateCamera);
+
+					if (CVarRonFollowActiveShooterGunCam.GetValueOnAnyThread() == 0 || !It->GetCharacter()->GetEquippedItem())
+					{
+						FHitResult Hit; 
+						FCollisionObjectQueryParams CollisionObjectQueryParams;
+						CollisionObjectQueryParams.AddObjectTypesToQuery(ECC_WorldStatic); 
+						CollisionObjectQueryParams.AddObjectTypesToQuery(ECC_WorldDynamic);
+						CollisionObjectQueryParams.AddObjectTypesToQuery(ECC_DOOR);
+						GetWorld()->LineTraceSingleByObjectType(Hit, It->GetCharacter()->GetActorLocation(), It->GetCharacter()->GetActorLocation() + It->GetCharacter()->GetActorForwardVector() * -160.0f + FVector(0.0f, 0.0f, 85.0f) + It->GetCharacter()->GetActorRightVector() * 30.0f, CollisionObjectQueryParams);
+						if (Hit.bBlockingHit)
+						{
+							SpectateCamera->SetActorLocation( FMath::VInterpTo(SpectateCamera->GetActorLocation(), Hit.ImpactPoint + Hit.ImpactNormal * 20.0f, DeltaSeconds, 10.0f));
+						} else
+						{
+							
+							SpectateCamera->SetActorLocation(FMath::VInterpTo(SpectateCamera->GetActorLocation(), Hit.TraceEnd, DeltaSeconds, 3.0f));
+						}
+
+						if (It->GetOwningController()->GetTrackedTarget() && It->GetOwningController()->LineOfSightTo(It->GetOwningController()->GetTrackedTarget()))
+						{
+							SpectateCamera->SetActorRotation(FMath::RInterpTo(SpectateCamera->GetActorRotation(), UKismetMathLibrary::FindLookAtRotation(SpectateCamera->GetActorLocation(), It->GetOwningController()->GetTrackedTarget()->GetActorLocation()), DeltaSeconds, 3.0f));
+						}
+						else
+						{
+							SpectateCamera->SetActorRotation(FMath::RInterpTo(SpectateCamera->GetActorRotation(), It->GetCharacter()->GetActorRotation(), DeltaSeconds, 3.0f));
+						}
+					}
+					else
+					{
+						ABaseMagazineWeapon* EquippedWeapon = Cast<ABaseMagazineWeapon>(It->GetCharacter()->GetEquippedItem());
+						SpectateCamera->SetActorLocation(FMath::VInterpTo(SpectateCamera->GetActorLocation(), EquippedWeapon->GetBulletSpawn()->GetComponentLocation() + EquippedWeapon->GetBulletSpawn()->GetForwardVector() * -100.0f + FVector(0.0f, 0.0f, 0.0f), DeltaSeconds, 3.0f));
+						SpectateCamera->SetActorRotation(FMath::RInterpTo(SpectateCamera->GetActorRotation(),  FRotator(EquippedWeapon->GetBulletSpawn()->GetComponentRotation().Pitch, EquippedWeapon->GetBulletSpawn()->GetComponentRotation().Yaw, 0.0f), DeltaSeconds, 3.0f));
+					}
+					
+					break;
+				}
+			}
+		}
+	}
+	#endif
+
+	#if !UE_BUILD_SHIPPING
+		#if PLATFORM_WINDOWS
+		FString ClientServerStr = GetNetMode() == ENetMode::NM_Client ? "[Client] " : "[Server] " ;
+		GEngine->AddOnScreenDebugMessage(10090, 1.0f, FColor::Yellow, ClientServerStr + "ProcessId: " + FString::FromInt(FWindowsPlatformProcess::GetCurrentProcessId()));
+		#endif
+	#endif
+
+	if (bIsReplaySpectator && GetPlayerState<AReadyOrNotPlayerState>())
+	{
+		GetPlayerState<AReadyOrNotPlayerState>()->Destroy();
+	}
+
+	DebugGatherDebugActors();
+	DebugDrawDebugActors(DeltaSeconds);
+
+	UReadyOrNotGameInstance* gi = Cast<UReadyOrNotGameInstance>(GetWorld()->GetGameInstance());
+	if (gi->bForceShowMouseCursor)
+	{
+		if (!(GetWorld()->GetDemoNetDriver() && GetWorld()->GetDemoNetDriver()->IsPlaying()))
+		{
+			SetShouldShowMouseCursor(gi->bForceShowMouseCursor);
+		}
+	}
+
+	RespawnTimeLeft = FMath::Max(RespawnTimeLeft - DeltaSeconds, 0.0f);
+	VoteAntiSpamDebouncerCurrent = FMath::Max(VoteAntiSpamDebouncerCurrent - DeltaSeconds, 0.0f);
+
+	if (GetViewTarget() == this)
+	{
+		if (Cast<APlayerCharacter>(GetPawn()))
+		{
+			SetViewTarget(GetPawn());
+		}
+	}
+	
+	APlayerCharacter* pc = Cast<APlayerCharacter>(GetPawn());
+	if (pc)
+	{
+		pc->ReplicatedControlRotation = GetControlRotation();
+		pc->ReplicatedControlRotation.Pitch += pc->FreeLookCache.Pitch;
+		pc->ReplicatedControlRotation.Yaw += pc->FreeLookCache.Yaw;
+
+        AReadyOrNotPlayerState* ps = GetRoNPlayerState();
+		if (ps)
+		{
+			if (!pc->IsDeadOrUnconscious())
+			{
+				ps->TimeAlive += DeltaSeconds;
+			}
+		}
+	}
+
+	#if !UE_BUILD_SHIPPING
+	if (bDrawScopeAlignmentTrace)
+	{
+		pc = Cast<APlayerCharacter>(GetPawn());
+		if (pc)
+		{
+			ABaseWeapon* bw = Cast<ABaseWeapon>(pc->GetEquippedItem());
+			if (bw && bw->ScopeAttachment)
+			{
+				if (bw->ScopeAttachment->bUsePipRendering)
+				{
+					DrawDebugLine(GetWorld(), bw->ScopeAttachment->PipSceneCapture->GetComponentLocation(), bw->ScopeAttachment->PipSceneCapture->GetComponentLocation() + (bw->ScopeAttachment->PipSceneCapture->GetForwardVector() * 20000.0f), FColor::Red, false, -1.0f, 0.0f, 0.25f);
+					DrawDebugLine(GetWorld(), bw->GetBulletSpawn()->GetComponentLocation(), bw->GetBulletSpawn()->GetComponentLocation() + (bw->GetBulletSpawn()->GetForwardVector() * 20000.0f), FColor::Green, false, -1.0f, 0.0f, 0.25f);
+				}
+			}
+		}
+	}
+	#endif
+}
+
+void AReadyOrNotPlayerController::SetShouldShowMouseCursor(bool bShow)
+{
+	bShouldShowMouseCursor = bShow;
+	UpdateMouseCursorVisibility();
+}
+
+bool AReadyOrNotPlayerController::IsConsoleTarget()
+{
+#if defined(TARGET_CONSOLE)
+	return true;
+#else
+	return false;
+#endif
+}
+
+void AReadyOrNotPlayerController::UpdateMouseCursorVisibility()
+{
+	bool bUsingGamepad = UReadyOrNotFunctionLibrary::IsUsingGamepad(this);
+	
+	bool bDoShow = bShouldShowMouseCursor && !bUsingGamepad;
+	bShowMouseCursor = bDoShow;
+	for (int i = 0; i < WidgetStack.Num(); ++i) {
+		UUserWidget* Widget = UBpGameplayHelperLib::GetFirstWidgetFromViewport(WidgetStack[i]);
+		if (Widget != nullptr)
+			Widget->SetCursor(bDoShow ? EMouseCursor::Default : EMouseCursor::None);
+	}
+}
+
+void AReadyOrNotPlayerController::Server_SetChecksum_Implementation(int32 Checksum)
+{
+	ServerSideChecksum = Checksum;
+}
+
+bool AReadyOrNotPlayerController::Server_SetChecksum_Validate(int32 Checksum)
+{
+	return true;
+}
+
+AReadyOrNotPlayerState* AReadyOrNotPlayerController::GetReadyOrNotPlayerState()
+{
+	return Cast<AReadyOrNotPlayerState>(PlayerState);
+}
+
+void AReadyOrNotPlayerController::ClientSetNetSpeed_Implementation(int32 NewNetSpeed)
+{
+	SetNetSpeed(NewNetSpeed);
+}
+
+void AReadyOrNotPlayerController::SetPawn(APawn* InPawn)
+{
+	if (InPawn)
+	{
+		// Fixes glitchy camera in the customization viewport
+		if (!InPawn->Tags.Contains("OrbitalCameraActor"))
+		{
+			bAutoManageActiveCameraTarget = true;
+		}
+		else
+		{
+			bAutoManageActiveCameraTarget = false;
+		}
+
+		
+
+	}
+	Super::SetPawn(InPawn);
+
+	if (bAutoManageActiveCameraTarget)
+	{
+		Client_SetViewTargetWithBlend(InPawn);
+		Client_SetViewTargetWithBlend_Implementation(InPawn);
+	}
+	OnPawnPossessed.Broadcast(InPawn);
+}
+
+void AReadyOrNotPlayerController::PawnLeavingGame()
+{
+	if (!GetWorld())
+		return;
+
+	AReadyOrNotGameMode* GM = GetWorld()->GetAuthGameMode<AReadyOrNotGameMode>();
+
+	if (!GM)
+		return;
+	
+	if (APlayerCharacter* pc = Cast<APlayerCharacter>(GetPawn()))
+	{
+		if (GM->GetMatchState() == EMatchState::MS_Playing && !Cast<ALobbyGM>(GM))
+		{
+			pc->OnCharacterKilled.RemoveAll(GM);
+			pc->GetHealthComponent()->OnPawnLeavingGame();
+			pc->Kill();
+			pc->SetLifeSpan(5.0f);
+		}
+		else
+		{
+			Super::PawnLeavingGame();
+		}
+	}
+	else
+	{
+		Super::PawnLeavingGame();
+	}
+}
+
+void AReadyOrNotPlayerController::SetupInputComponent()
+{
+	Super::SetupInputComponent();
+
+	InputComponent->BindAction("PushToTalk", IE_Pressed, this, &AReadyOrNotPlayerController::StartSpeaking);
+	InputComponent->BindAction("PushToTalk", IE_Released, this, &AReadyOrNotPlayerController::StopSpeaking);
+	InputComponent->BindAction("CycleVoiceChannel", IE_Pressed, this, &AReadyOrNotPlayerController::CycleVoiceChannel);
+	//InputComponent->BindAction("VoteYes", IE_Pressed, this, &AReadyOrNotPlayerController::VoteYes);
+	//InputComponent->BindAction("VoteNo", IE_Pressed, this, &AReadyOrNotPlayerController::VoteNo);
+	InputComponent->BindAction("RTXOnOff", IE_Pressed, this, &AReadyOrNotPlayerController::ToggleRTXDMO);
+	// InputComponent->BindAction("EscapeMenu", IE_Pressed, this, &AReadyOrNotPlayerController::EscapeMenu);
+	InputComponent->BindAction("EscapeMenu", IE_Pressed, this, &AReadyOrNotPlayerController::OpenPauseMenu);
+	InputComponent->BindAction("SpectateNextPlayer", IE_Released, this, &AReadyOrNotPlayerController::SpectateNextPlayer);
+	InputComponent->BindAction("SpectatePreviousPlayer", IE_Pressed, this, &AReadyOrNotPlayerController::SpectatePreviousPlayer);
+	
+	FInputActionBinding& ShowTabMenuBinding = InputComponent->BindAction("ViewScoreboard", IE_Pressed, this, &AReadyOrNotPlayerController::ShowTabMenu);
+	FInputActionBinding& HideTabMenuBinding = InputComponent->BindAction("ViewScoreboard", IE_Released, this, &AReadyOrNotPlayerController::HideTabMenu);
+	ShowTabMenuBinding.bConsumeInput = false;
+	HideTabMenuBinding.bConsumeInput = false;
+
+	FInputActionBinding& ReadyUpBinding = InputComponent->BindAction("ReadyUp", IE_Pressed, this, &AReadyOrNotPlayerController::ReadyUp);
+	ReadyUpBinding.bConsumeInput = false;
+
+	// in case the "Ready Up" key binding was unbound, due to exisiting key binding save data,
+	// make sure we can still launch into missions by falling back on a hardcoded key bind, the Y key
+	FInputKeyBinding& KeyBinding = InputComponent->BindKey(EKeys::Y, IE_Pressed, this, &AReadyOrNotPlayerController::ReadyUp_Failsafe);
+	KeyBinding.bConsumeInput = false;
+}
+
+void AReadyOrNotPlayerController::ClientSpawned_Implementation()
+{
+	// This is also called on the server.
+	AReadyOrNotPlayerState* ps = GetPlayerState<AReadyOrNotPlayerState>();
+	if (ps)
+	{
+		ps->TimeAlive = 0.0f;
+
+		if (GetLocalRole() >= ROLE_Authority)
+		{
+			ps->ArrestsThisLife = 0;
+			ps->KillsThisLife = 0;
+			ps->ResetBulletsFired();
+			ps->BulletsBlocked = 0;
+			ps->HitsReceived = 0;
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::Server_StartSpectating_Implementation()
+{
+	AReadyOrNotGameMode* gm = Cast<AReadyOrNotGameMode>(GetWorld()->GetAuthGameMode());
+	if (gm)
+	{
+		if (gm->GetRandomSafeStart())
+		{
+			FTransform RandomTransform = gm->GetRandomSafeStart()->GetActorTransform();
+			RandomTransform.SetLocation(RandomTransform.GetLocation() + FVector(0.0f, 0.0f, 100.0f));
+			gm->SpawnSpectator(this, gm->DeadSpectatorClass, RandomTransform);
+			Client_SetControlRotation(RandomTransform.GetRotation().Rotator());
+		}
+		
+	}
+}
+
+bool AReadyOrNotPlayerController::Server_StartSpectating_Validate()
+{
+	return true;
+}
+
+
+void AReadyOrNotPlayerController::ClientSetSpectatorCamera_Implementation(FVector CameraLocation, FRotator CameraRotation)
+{
+	SetInitialLocationAndRotation(CameraLocation, CameraRotation);
+	SetViewTarget(this);
+	
+}
+
+void AReadyOrNotPlayerController::PawnPendingDestroy(APawn* inPawn)
+{
+	LastDeathLocation = inPawn->GetActorLocation();
+	FVector CameraLocation = LastDeathLocation + FVector(0, 0, 300.0f);
+	FRotator CameraRotation(-90.0f, 0.0f, 0.0f);
+	FindDeathCameraSpot(CameraLocation, CameraRotation);
+
+	Super::PawnPendingDestroy(inPawn);
+
+	ClientSetSpectatorCamera(CameraLocation, CameraRotation);
+}
+
+bool AReadyOrNotPlayerController::FindDeathCameraSpot(FVector& CameraLocation, FRotator& CameraRotation)
+{
+	const FVector PawnLocation = GetPawn()->GetActorLocation();
+	FRotator ViewDir = GetControlRotation();
+	ViewDir.Pitch = -45.0f;
+
+	const float YawOffsets[] = { 0.0f, -180.0f, 90.0f, -90.0f, 45.0f, -45.0f, 135.0f, -135.0f };
+	const float CameraOffset = 600.0f;
+	FCollisionQueryParams TraceParams(TEXT("DeathCamera"), true, GetPawn());
+
+	FHitResult HitResult;
+	for (int32 i = 0; i < UE_ARRAY_COUNT(YawOffsets); i++)
+	{
+		FRotator CameraDir = ViewDir;
+		CameraDir.Yaw += YawOffsets[i];
+		CameraDir.Normalize();
+
+		const FVector TestLocation = PawnLocation - CameraDir.Vector() * CameraOffset;
+
+		const bool bBlocked = GetWorld()->LineTraceSingleByChannel(HitResult, PawnLocation, TestLocation, ECC_Camera, TraceParams);
+
+		if (!bBlocked)
+		{
+			CameraLocation = TestLocation;
+			CameraRotation = CameraDir;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void AReadyOrNotPlayerController::ClientTravelInternal_Implementation(const FString& URL, ETravelType TravelType, bool bSeamless, FGuid MapPackageGuid)
+{
+	UWorld* World = GetWorld();
+
+	FString newURL = URL;
+	newURL += "?password=" + GetPasswordOnConnection();
+
+	newURL += "?teamuniqueid=" + GetPrefferredTeamUniqueNetIdOnConnection();
+
+	// Warn the client.
+	PreClientTravel(newURL, TravelType, bSeamless);
+	StopSpeaking();
+	IOnlineVoicePtr VoiceInterface = Online::GetVoiceInterface();
+	if (VoiceInterface.Get())
+	{
+		VoiceInterface->RemoveAllRemoteTalkers();
+	}
+	UVOIPStatics::ClearAllSettings();
+
+	for (TObjectIterator<USynthComponent>It; It; ++It)
+	{
+		It->Stop();
+	}
+	if (bSeamless && TravelType == TRAVEL_Relative)
+	{
+		World->SeamlessTravel(newURL);
+	}
+	else
+	{
+		if (bSeamless)
+		{
+			UE_LOG(LogReadyOrNot, Warning, TEXT("Unable to perform seamless travel because TravelType was %i, not TRAVEL_Relative"), int32(TravelType));
+		}
+		// Do the travel.
+		GEngine->SetClientTravel(World, *newURL, (ETravelType)TravelType);
+	}
+}
+
+void AReadyOrNotPlayerController::PreClientTravel(const FString& PendingURL, ETravelType TravelType,
+	bool bIsSeamlessTravel)
+{
+
+	OnPreClientTravel.Broadcast();
+	Super::PreClientTravel(PendingURL, TravelType, bIsSeamlessTravel);
+	FString OutL, Options, Mode, NA, MapName;
+	PendingURL.Split("?", &OutL, &Options);
+	PendingURL.Split("?Game=", &NA, &Mode);
+	OutL.Split("/", &NA, &MapName, ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+	ULevelStreaming* OutStreamedLevel;
+	FLevelStreamOptions LevelStreamOptions;
+	LevelStreamOptions.bExecuteOpenLevelWhenLoaded = false;
+	LevelStreamOptions.bShouldRemoveLoadingScreen = false;
+	LevelStreamOptions.bIsSeamlessTravel = bIsSeamlessTravel;
+	IOnlineSubsystem* OnlineSub = IOnlineSubsystem::Get();
+	if (OnlineSub)
+	{
+		IOnlineSessionPtr SessionInt = Online::GetSessionInterface();
+		if (SessionInt)
+		{
+			#if defined(WITH_STEAM) || defined(USE_EOS) || defined(TARGET_CONSOLE)
+				#if defined(TARGET_PS5)
+					FNamedOnlineSession* Session = SessionInt->GetNamedSession(NAME_PartySession);
+				#else
+					FNamedOnlineSession* Session = SessionInt->GetNamedSession(NAME_GameSession);
+				#endif
+			if (Session != nullptr)
+			{
+				Session->SessionSettings.Get(SETTING_GAMENAME, LevelStreamOptions.SessionName);
+			}
+			#endif
+		}
+	}
+	if (LevelStreamOptions.ModeName.IsEmpty())
+	{
+		FString LeftSplit, RightSplit;
+		Mode.Split("?", &LeftSplit, &RightSplit);
+		LevelStreamOptions.ModeName = LeftSplit.IsEmpty() ? Mode : LeftSplit;
+	}
+
+#if defined(TARGET_CONSOLE) || defined(USE_EOS)
+	if (MapName.IsEmpty()) {
+		MapName = StreamingLevel;
+	}
+#endif
+
+	StreamInLevel(MapName, Options, OutStreamedLevel, LevelStreamOptions);
+}
+
+void AReadyOrNotPlayerController::BP_ReturnToMenu(const FText& ReturnReason)
+{
+	UGameplayStatics::SetGamePaused(this, false);
+	UReadyOrNotFunctionLibrary::PauseFMOD(false);
+
+	ClientReturnToMainMenuWithTextReason(ReturnReason);
+}
+
+void AReadyOrNotPlayerController::ClientReturnToMainMenuWithTextReason(const FText& ReturnReason)
+{
+	// set the return to menu reason if any
+	UReadyOrNotGameInstance* gi = Cast<UReadyOrNotGameInstance>(GetWorld()->GetGameInstance());
+	if (gi)
+	{
+		if (gi->MainMenuDisplayMessage.IsEmpty())
+		{
+			gi->MainMenuDisplayMessage = ReturnReason.ToString();
+		}
+	}
+
+	// destroy the session if valid
+	IOnlineSubsystem* OnlineSub = IOnlineSubsystem::Get();
+	if (OnlineSub)
+	{
+		IOnlineSessionPtr Sessions = OnlineSub->GetSessionInterface();
+		if (Sessions.IsValid() && (Sessions->GetNamedSession(GameSessionName) != nullptr))
+		{
+			// Note this is async, it could possibly be a problem that is does not await that the session is confirmed destroyed.
+			Sessions->DestroySession(GameSessionName);
+		}
+	}
+
+	UReadyOrNotStatics::GetReadyOrNotGameInstance()->LeaveVoiceChannels();
+
+	ULevelStreaming* OutStreamedLevel;
+	FLevelStreamOptions LevelStreamOptions;
+	LevelStreamOptions.bStreamInLevelBeforeLoad = true;
+	StreamInLevel("MainMenu_V2", "", OutStreamedLevel, LevelStreamOptions);
+}
+
+void AReadyOrNotPlayerController::GetNetworkConnectionStatus(float& AvgLag, int32& OutLostPackets, int32& InLostPackets, int32& OutLostPacketPrcnt, int32& InLostPacketPrcnt)
+{
+	if (GetNetConnection())
+	{
+		AvgLag = GetNetConnection()->AvgLag;
+		OutLostPackets = GetNetConnection()->OutPacketsLost;
+		InLostPackets = GetNetConnection()->InPacketsLost;
+		OutLostPacketPrcnt = GetNetConnection()->GetOutLossPercentage().GetAvgLossPercentage()*100;
+		InLostPacketPrcnt = GetNetConnection()->GetOutLossPercentage().GetAvgLossPercentage()*100;
+	}
+	
+}
+
+void AReadyOrNotPlayerController::ClientStartCameraShake2(UCameraShakeBase* Shake, float Scale, ECameraShakePlaySpace PlaySpace, FRotator UserPlaySpaceRot)
+{
+	if (bDisableCameraShakes)
+		return;
+
+	if (AReadyOrNotPlayerCameraManager* RONCameraManager = Cast<AReadyOrNotPlayerCameraManager>(PlayerCameraManager))
+	{
+		RONCameraManager->StartCameraShake2(Shake, Scale, PlaySpace, UserPlaySpaceRot);
+	}
+}
+
+void AReadyOrNotPlayerController::ClientStartCameraShake_Implementation(TSubclassOf<UCameraShakeBase> Shake, float Scale, ECameraShakePlaySpace PlaySpace, FRotator UserPlaySpaceRot)
+{
+	if (bDisableCameraShakes)
+		return;
+	
+	Super::ClientStartCameraShake_Implementation(Shake, Scale, PlaySpace, UserPlaySpaceRot);
+}
+
+void AReadyOrNotPlayerController::ClientStartOnlineGame_Implementation()
+{
+	if (!IsPrimaryPlayer())
+		return;
+
+	AReadyOrNotPlayerState* RonPlayerState = Cast<AReadyOrNotPlayerState>(PlayerState);
+	if (RonPlayerState)
+	{
+		IOnlineSubsystem* OnlineSub = IOnlineSubsystem::Get();
+		if (OnlineSub)
+		{
+			IOnlineSessionPtr Sessions = OnlineSub->GetSessionInterface();
+			if (Sessions.IsValid() && (Sessions->GetNamedSession(GameSessionName) != nullptr))
+			{
+				UE_LOG(LogOnline, Log, TEXT("Starting session on client"));
+				Sessions->StartSession(GameSessionName);
+			}
+		}
+	}
+	else
+	{
+		// Keep retrying until player state is replicated
+		GetWorld()->GetTimerManager().SetTimer(TimerHandle_ClientStartOnlineGame, this, &AReadyOrNotPlayerController::ClientStartOnlineGame_Implementation, 0.2f, false);
+	}
+}
+
+void AReadyOrNotPlayerController::ClientEndOnlineGame_Implementation()
+{
+	if (!IsPrimaryPlayer())
+		return;
+
+	AReadyOrNotPlayerState* RonPlayerState = Cast<AReadyOrNotPlayerState>(PlayerState);
+	if (RonPlayerState)
+	{
+		IOnlineSubsystem* OnlineSub = IOnlineSubsystem::Get();
+		if (OnlineSub)
+		{
+			IOnlineSessionPtr Sessions = OnlineSub->GetSessionInterface();
+			if (Sessions.IsValid() && (Sessions->GetNamedSession(GameSessionName) != nullptr))
+			{
+				UE_LOG(LogOnline, Log, TEXT("Ending session on client"));
+				Sessions->EndSession(GameSessionName);
+			}
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::NotifyRespawnTime_Implementation(float RespawnTime)
+{
+	RespawnTimeLeft = RespawnTime;
+}
+
+float AReadyOrNotPlayerController::GetRespawnTimeRemaining()
+{
+	AReadyOrNotPlayerController* pc = Cast<AReadyOrNotPlayerController>(UGameplayStatics::GetPlayerController(UBpGameplayHelperLib::GetWorldStatic(), 0));
+	if (pc)
+	{
+		return pc->RespawnTimeLeft;
+	}
+	return 0.0f;
+}
+
+void AReadyOrNotPlayerController::ChangeInputMode(bool bGameMode, bool bMouseCursorEnabled, UWidget* Widget)
+{
+	if (bGameMode && !bMouseCursorEnabled)
+	{
+		SetShouldShowMouseCursor(false);
+		SetInputMode(FInputModeGameOnly());
+	}
+	else if (bGameMode && bMouseCursorEnabled)
+	{
+		FInputModeGameAndUI InputMode;
+		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::LockInFullscreen);
+		
+		if (Widget)
+			InputMode.SetWidgetToFocus(Widget->TakeWidget());
+		
+		SetShouldShowMouseCursor(true);
+		SetInputMode(InputMode);
+	}
+	else
+	{
+		// Code repetition somewhat unavoidable here
+		FInputModeUIOnly InputMode;
+		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::LockInFullscreen);
+		
+		if (Widget && Widget->TakeWidget()->SupportsKeyboardFocus())
+			InputMode.SetWidgetToFocus(Widget->TakeWidget());
+
+		SetInputMode(InputMode);
+		SetShouldShowMouseCursor(bMouseCursorEnabled);
+	}
+}
+
+void AReadyOrNotPlayerController::EnablePlayerInput()
+{
+	EnableInput(this);
+}
+
+bool AReadyOrNotPlayerController::CanOpenPauseMenu()
+{
+	if (GetWorld()->GetMapName().Contains("MainMenu"))
+	{
+		return false;
+	}
+
+	if (const APawn* MyPawn = GetPawn())
+	{
+		if (MyPawn->bBlockInput)
+		{
+			const AReadyOrNotCharacter* character = Cast<AReadyOrNotCharacter>(MyPawn);
+
+			if (IsValid(character) && !character->IsDeadNotUnconscious())
+			{
+				return false;
+			}
+		}
+	}
+
+	if (const AGameStateBase* GameStateBase = GetWorld()->GetGameState())
+	{
+		if (!GameStateBase->HasMatchStarted())
+		{
+			return false;
+		}
+	}
+
+	if (HasLoadingScreenInViewport())
+	{
+		return false;
+	}
+
+	if (UBpGameplayHelperLib::IsWidgetOfClassInViewport(GetWorld(), UPauseMenu_Wrapper::StaticClass()))
+	{
+		return false;
+	}
+
+	if (UBpGameplayHelperLib::IsWidgetOfClassInViewport(GetWorld(), UPreMissionPlanning::StaticClass()))
+	{
+		return false;
+	}
+
+	if (UBpGameplayHelperLib::IsWidgetOfClassInViewport(GetWorld(), UMissionEnd::StaticClass()))
+	{
+		return false;
+	}
+
+	if (UBpGameplayHelperLib::IsWidgetOfClassInViewport(GetWorld(), UCollectableWidget::StaticClass()))
+	{
+		return false;
+	}
+
+	return true;
+}
+
+void AReadyOrNotPlayerController::OpenPauseMenu()
+{
+	if (!CanOpenPauseMenu())
+	{
+		return;
+	}
+
+	const FWidgetLookupData WidgetData = UBpGameplayHelperLib::GetWidgetDataFromLookupData("Escape", false);
+	if (WidgetData.WidgetClass)
+	{
+		PauseMenu = CreateWidget<UPauseMenu_Wrapper>(GetWorld(), WidgetData.WidgetClass);
+		PauseMenu->AddToViewport(99990);
+		PauseMenu->OpenPauseMenu();
+	}
+}
+
+// Not needed when using an activatable widget with a back-handler.
+void AReadyOrNotPlayerController::EscapeMenu()
+{
+	const AReadyOrNotGameState* GameState = UReadyOrNotStatics::GetReadyOrNotGameState();
+	if(GameState && GameState->Loadout_V2 != nullptr)	
+		return;
+	
+	if (WidgetStack.Num() > 0)
+	{
+		// hack to always save keybinds when exiting
+		UBpGameplayHelperLib::SaveKeybinds();
+		const FString RemoveWidget = WidgetStack.Pop();
+		
+		UBpGameplayHelperLib::RemoveWidgetFromViewport(RemoveWidget);
+		
+		if (WidgetStack.Num() > 0)
+		{
+			// Note: every time we pop and have a widget in the stack, just focus on it. No need to recreate it
+			if (UUserWidget* LastWidget = UBpGameplayHelperLib::GetFirstWidgetFromViewport(WidgetStack.Last()))
+			{
+				const FWidgetLookupData WidgetData = UBpGameplayHelperLib::GetWidgetDataFromLookupData(WidgetStack.Last());
+				
+				ChangeInputMode(false, WidgetData.bMouseUIOnly || WidgetData.bShowMouseCursor, LastWidget);
+			}
+		}
+		else
+		{
+			if ((bPreEscapeMenuMouseEnabled || (GetWorld()->GetMapName().Contains("MainMenu")) && !UBpGameplayHelperLib::HasWidgetInViewport("CharacterHUD_V2")))
+			{
+				UReadyOrNotGameInstance* gi = Cast<UReadyOrNotGameInstance>(GetWorld()->GetGameInstance());
+				gi->bForceShowMouseCursor = true;
+				ChangeInputMode(true, true);
+			}
+			else
+			{
+				UReadyOrNotGameInstance* gi = Cast<UReadyOrNotGameInstance>(GetWorld()->GetGameInstance());
+				gi->bForceShowMouseCursor = false;
+				ChangeInputMode(true, false);
+			}
+			
+			if (GetPawn())
+			{
+				GetPawn()->bBlockInput = false;
+			}
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::ShowTabMenu()
+{
+	ASpectatePawn* SpectatePawn = Cast<ASpectatePawn>(GetPawn());
+	if (!SpectatePawn)
+		return;
+	
+	if (TabMenuWidget)
+		HideTabMenu();
+	
+	TabMenuWidget = CreateWidget<UUserWidget>(this, TabMenuWidgetClass);
+	if (TabMenuWidget)
+		TabMenuWidget->AddToViewport();
+}
+
+void AReadyOrNotPlayerController::HideTabMenu() {
+        if (!TabMenuWidget)
+                return;
+
+        TabMenuWidget->RemoveFromParent();
+        TabMenuWidget = nullptr;
+}
+bool AReadyOrNotPlayerController::IsOverlayHudVisible() const {
+	return CVarRonShowHudOverlay.GetValueOnAnyThread() == 1;
+}
+
+void AReadyOrNotPlayerController::SetupSubtitles()
+{
+	DestroySubtitles();
+
+	if (!IsLocalPlayerController())
+		return;
+	
+	const FWidgetLookupData WidgetData = UBpGameplayHelperLib::GetWidgetDataFromLookupData("SubtitlesOverlay");
+	if (!WidgetData.WidgetClass)
+		return;
+	
+	SubtitlesWidget = CreateWidget<UUserWidget>(this, WidgetData.WidgetClass);
+	if (SubtitlesWidget)
+	{
+		SubtitlesWidget->AddToViewport(WidgetData.ZOrder);
+	}
+}
+
+void AReadyOrNotPlayerController::DestroySubtitles()
+{
+	if (IsValid(SubtitlesWidget))
+		SubtitlesWidget->RemoveFromParent();
+
+	SubtitlesWidget = nullptr;
+}
+
+void AReadyOrNotPlayerController::ToggleDeployMenu()
+{
+	if (!GET_GAME_STATE(ALobbyGS))
+		return;
+
+	
+	DisableInput(this);
+	
+	if (UReadyOrNotStatics::GetReadyOrNotGameState()->MatchState == EMatchState::MS_Playing)
+	{
+		if (UBpGameplayHelperLib::IsWidgetOfClassInViewport(GetWorld(), UPreMissionPlanning::StaticClass()))
+		{			
+			if(GetReadyOrNotPlayerState()->bIsInGame)
+			{
+				EscapeMenu();							
+			}
+		}
+		else
+		{
+			for (TObjectIterator<UHumanCharacterHUD_V2>It; It; ++It)
+			{
+				UHumanCharacterHUD_V2* HumanCharacterHUD_V2 = *It;
+				HumanCharacterHUD_V2->SetVisibility(ESlateVisibility::Collapsed);
+			}
+			Client_CreateWidget_Implementation(AReadyOrNotPlayerController::MENU_PRE_MISSION_PLANNING, true);
+			PlayerCameraManager->StartCameraFade(4.0f, 0.0f, 3.0f, FLinearColor::Black);
+			// call this twice, once to start the level load
+			UReadyOrNotFunctionLibrary::StartTimerForCallback(UReadyOrNotStatics::GetReadyOrNotGameState(), &AReadyOrNotGameState::LoadSubPreMissionPlanningFromTimer, 0.1f);
+			UReadyOrNotFunctionLibrary::StartTimerForCallback(UReadyOrNotStatics::GetReadyOrNotGameState(), &AReadyOrNotGameState::LoadSubPreMissionPlanningFromTimer, 1.0f);
+		}
+	}
+
+	UReadyOrNotFunctionLibrary::StartTimerForCallback(this, &AReadyOrNotPlayerController::EnablePlayerInput, 0.75f);
+}
+
+void AReadyOrNotPlayerController::DownloadBlacklistHashes()
+{
+	UBpGameplayHelperLib::GetRONGameInstance()->ReadyOrNotBackend->DownloadHashes();
+}
+
+void AReadyOrNotPlayerController::DestroyAllExceptClosestCharacter()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	ACyberneticCharacter* ClosestAI = nullptr;
+	float ClosestDist = BIG_DIST;
+	for (TActorIterator<ACyberneticCharacter>It(GetWorld()); It; ++It)
+	{
+		ACyberneticCharacter* AI = *It;
+		float Dist =(AI->GetActorLocation() - GetPawn()->GetActorLocation()).Size();
+		if (Dist < ClosestDist)
+		{
+			ClosestAI = AI;
+			ClosestDist = Dist;
+		}
+	}
+
+	for (TActorIterator<ACyberneticCharacter>It(GetWorld()); It; ++It)
+	{
+		ACyberneticCharacter* AI = *It;
+		if (AI->IsOnSWATTeam())
+			continue;
+
+		if (AI != ClosestAI)
+		{
+			AI->Destroy();
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::DestroyAllExceptClosestDoor()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	ADoor* ClosestDoor  = nullptr;
+	float ClosestDist = BIG_DIST;
+	for (TActorIterator<ADoor>It(GetWorld()); It; ++It)
+	{
+		ADoor* Door = *It;
+		float Dist =(Door->GetActorLocation() - GetPawn()->GetActorLocation()).Size();
+		if (Dist < ClosestDist)
+		{
+			ClosestDoor = Door;
+			ClosestDist = Dist;
+		}
+	}
+
+	for (TActorIterator<ADoor>It(GetWorld()); It; ++It)
+	{
+		ADoor* Door = *It;
+
+		if (Door != ClosestDoor)
+		{
+			Door->Destroy();
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::OnlyCastLocalPlayerDynamicShadow()
+{
+	if (!UBpGameplayHelperLib::GetLocalPlayerCharacter(GetWorld()))
+		return;
+	
+	for (TObjectIterator<USkeletalMeshComponent>It;It;++It)
+	{
+		AReadyOrNotCharacter* OwnerChar = Cast<AReadyOrNotCharacter>(It->GetOwner());
+		if (!OwnerChar)
+		{
+			It->SetCastShadow(false);
+		}
+	}
+
+	for (TObjectIterator<UStaticMeshComponent>It; It; ++It)
+	{
+		if (!Cast<ADoor>(It->GetOwner()))
+			It->SetCastShadow(false);
+	}
+}
+
+void AReadyOrNotPlayerController::AIEquipPrimary()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TActorIterator<ACyberneticCharacter>It(GetWorld()); It; ++It)
+	{
+		ACyberneticCharacter* AI = *It;
+		AI->GetInventoryComponent()->EquipItemOfType(EItemCategory::IC_Primary);
+	}
+}
+
+void AReadyOrNotPlayerController::DestroyAllActorsOfName(FString Name)
+{
+	for (TActorIterator<AActor>It(GetWorld()); It; ++It)
+	{
+		if (It->GetName().ToLower().Contains(Name.ToLower()))
+		{
+			It->Destroy();
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::AIEquipSecondary()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TActorIterator<ACyberneticCharacter>It(GetWorld()); It; ++It)
+	{
+		ACyberneticCharacter* AI = *It;
+		AI->GetInventoryComponent()->EquipItemOfType(EItemCategory::IC_Secondary);
+	}
+}
+
+void AReadyOrNotPlayerController::OptimizeWorld()
+{
+	
+	for (TActorIterator<ADecalActor>It(GetWorld()); It; ++It)
+	{
+		ADecalActor* Decal = *It;
+		if (Decal->GetDecal()->FadeScreenSize <= 0.01f)
+		{
+			Decal->GetDecal()->SetFadeScreenSize(0.2f);
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::DestroyAllDecals()
+{
+	for (TActorIterator<ADecalActor>It(GetWorld()); It; ++It)
+	{
+		ADecalActor* Decal = *It;
+		V_LOGM(LogReadyOrNot, "Destroying %s", *Decal->GetName());
+		Decal->Destroy();
+		
+	}
+}
+
+void AReadyOrNotPlayerController::DestroyEverything()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TObjectIterator<AStaticMeshActor>It; It; ++It)
+	{
+		It->Destroy();
+	}
+
+	for (TObjectIterator<UStaticMeshComponent>It; It; ++It)
+	{
+		if (It->GetOwner())
+		{
+			It->GetOwner()->Destroy();
+		}
+	}
+
+	for (TObjectIterator<USkeletalMeshComponent>It;It;++It)
+	{
+		if (It->GetOwner())
+		{
+			It->GetOwner()->Destroy();
+		}
+	}
+
+	for (TObjectIterator<UParticleSystemComponent>It; It; ++It)
+	{
+		if (It->GetOwner())
+		{
+			It->GetOwner()->Destroy();
+		}
+	}
+
+	for (TObjectIterator<UActorComponent>It; It; ++It)
+	{
+		if (It->GetOwner())
+		{
+			It->GetOwner()->Destroy();
+		}
+	}
+
+	// for (TActorIterator<AActor>It(GetWorld()); It; ++It)
+	// {
+	// 	It->Destroy();
+	// }
+}
+
+void AReadyOrNotPlayerController::DestroyAllWorldDynamicItems()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TActorIterator<ADynamicWorldActor>It(GetWorld()); It; ++It)
+	{
+		It->Destroy();
+	}
+	for (TActorIterator<ADynamicWorldItem>It(GetWorld()); It; ++It)
+	{
+		It->Destroy();
+	}
+}
+
+void AReadyOrNotPlayerController::DestroyAllLights()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TActorIterator<ALight>It(GetWorld()); It; ++It)
+	{
+		It->Destroy();
+	}
+}
+
+void AReadyOrNotPlayerController::ReportAllInstancedStaticMeshes()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TObjectIterator<UHierarchicalInstancedStaticMeshComponent>It; It; ++It)
+	{
+		UHierarchicalInstancedStaticMeshComponent* Comp = *It;
+		V_LOGM(LogReadyOrNot, "%s", *Comp->GetName());
+	}
+}
+
+void AReadyOrNotPlayerController::StartBleeding()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	APlayerCharacter* PlayerCharacter = Cast<APlayerCharacter>(GetPawn());
+	if (PlayerCharacter)
+	{
+		PlayerCharacter->GetBleedComponent()->StartBleeding();
+	}
+}
+
+void AReadyOrNotPlayerController::ResetDoorLockStateKnowledge()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TActorIterator<ADoor>It(GetWorld()); It; ++It)
+	{
+		ADoor* Door = *It;
+		Door->SetDoorLockKnowledge(false, false);
+	}
+}
+
+void AReadyOrNotPlayerController::AbortCover()
+{
+	for (TActorIterator<ACyberneticController>It(GetWorld()); It; ++It)
+	{
+		ACyberneticController* CyberController = *It;
+		CyberController->AbortCover();
+	}
+}
+
+void AReadyOrNotPlayerController::AIHide()
+{
+	for (TActorIterator<ACyberneticController>It(GetWorld()); It; ++It)
+	{
+		ACyberneticController* CyberController = *It;
+		CyberController->GetCombatActivity()->TryMoveIntoCoverLandmark();
+	}
+}
+
+void AReadyOrNotPlayerController::AIStopHide()
+{
+	for (TActorIterator<ACyberneticController>It(GetWorld()); It; ++It)
+	{
+		ACyberneticController* CyberController = *It;
+		CyberController->AbortCoverLandmark();
+	}
+}
+
+void AReadyOrNotPlayerController::SkipTutorial()
+{
+	if (!GetWorld())
+		return;
+
+	if (ATrainingGM* TrainingGameMode = GetWorld()->GetAuthGameMode<ATrainingGM>())
+	{
+		TrainingGameMode->TrainingEnd(true);
+	}
+}
+
+bool AReadyOrNotPlayerController::IsAFK(float AFKTime)
+{
+	// explicitly defined. cant afk while dead or specating.. only kick when they're actually alive
+	if (Cast<ASpectatePawn>(GetPawn()))
+	{
+		return false;
+	}
+
+	return SecondsSinceLastMovement > AFKTime;
+}
+
+
+#if WITH_EDITOR
+void AReadyOrNotPlayerController::EnableDLCChecks(int32 i)
+{
+	DLCChecksEnabled = i;
+}
+#endif
+
+void AReadyOrNotPlayerController::SetMousePosition(float LocationX, float LocationY)
+{
+	FViewport* v = CastChecked<ULocalPlayer>(this->Player)->ViewportClient->Viewport;
+	int intX = (int)LocationX;
+	int intY = (int)LocationY;
+	v->SetMouse(intX, intY);
+}
+
+void AReadyOrNotPlayerController::Server_LoginAsAdmin_Implementation(const FString& password)
+{
+	
+	// only allow admins to login on a dedicated server.. on a listen server the host is always the admin
+	if (!UKismetSystemLibrary::IsDedicatedServer(GetWorld()))
+	   return;
+
+	if (password.IsEmpty())
+		return;
+	   
+	AReadyOrNotGameSession* Session = Cast<AReadyOrNotGameSession>(GetWorld()->GetAuthGameMode()->GameSession);
+	if (Session)
+	{		
+		if (Session->AdminPassword.Equals(password))
+		{
+			Session->AddAdmin(this);
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::Server_AdminRestartServer_Implementation()
+{
+	AReadyOrNotGameMode* gm = Cast<AReadyOrNotGameMode>(GetWorld()->GetAuthGameMode());
+	if (gm)
+	{
+		gm->RestartGame();
+	}
+}
+
+bool AReadyOrNotPlayerController::Server_AdminRestartServer_Validate()
+{
+	return IsAdmin();
+}
+
+void AReadyOrNotPlayerController::Server_AdminNextMap_Implementation()
+{
+	if (!IsAdmin())
+		return;
+
+	AReadyOrNotGameMode* gm = Cast<AReadyOrNotGameMode>(GetWorld()->GetAuthGameMode());
+	if (gm)
+	{
+		gm->NextGame();
+	}
+}
+
+bool AReadyOrNotPlayerController::Server_AdminNextMap_Validate()
+{
+	return IsAdmin();
+}
+
+void AReadyOrNotPlayerController::Server_AdminKickPlayer_Implementation(APlayerState* KickingPlayerState, const FText& ReasonOveride)
+{
+	if (KickingPlayerState != PlayerState)
+	{
+		AReadyOrNotGameMode* gm = Cast<AReadyOrNotGameMode>(GetWorld()->GetAuthGameMode());
+		if (gm)
+		{
+			for (TActorIterator<APlayerController> It(GetWorld()); It; ++It)
+			{
+				APlayerController* player = *It;
+				if (player->PlayerState == KickingPlayerState)
+				{
+					FText Reason = NSLOCTEXT("ReadyOrNot", "ReadyOrNot", "You have been kicked by an admin.");
+					if (!ReasonOveride.IsEmpty()) Reason = ReasonOveride;
+					if (gm->GetReadyOrNotGameSession())
+					{
+						player->ClientWasKicked(Reason);
+						gm->GetReadyOrNotGameSession()->KickPlayer(player, Reason);
+					}
+					return;
+				}
+			}
+		}
+	}
+}
+
+bool AReadyOrNotPlayerController::Server_AdminKickPlayer_Validate(APlayerState* KickingPlayerState, const FText& ReasonOveride)
+{
+	return IsAdmin();
+}
+
+void AReadyOrNotPlayerController::Server_AdminBanPlayer_Implementation(APlayerState* BanningPlayerState)
+{
+	AReadyOrNotGameMode* gm = Cast<AReadyOrNotGameMode>(GetWorld()->GetAuthGameMode());
+	if (gm)
+	{
+		for (TActorIterator<APlayerController> It(GetWorld()); It; ++It)
+		{
+			APlayerController* player = *It;
+			if (player->PlayerState == BanningPlayerState)
+			{
+				if (gm->GetReadyOrNotGameSession())
+				{
+					FText Reason = NSLOCTEXT("ReadyOrNot", "ReadyOrNot", "You have been kicked by an admin.");
+					player->ClientWasKicked(Reason);
+					gm->GetReadyOrNotGameSession()->BanPlayer(player, Reason);
+					return;
+				}
+			}
+		}
+	}
+}
+
+bool AReadyOrNotPlayerController::Server_AdminBanPlayer_Validate(APlayerState* BanningPlayerState)
+{
+	return IsAdmin();
+}
+
+void AReadyOrNotPlayerController::Server_AdminAddMapToRotation_Implementation(const FString& MapURL)
+{
+	AReadyOrNotGameMode* gm = Cast<AReadyOrNotGameMode>(GetWorld()->GetAuthGameMode());
+	if (gm)
+	{
+		AReadyOrNotGameSession* gs = gm->GetReadyOrNotGameSession();
+		if (gs)
+		{
+			gs->MapList.AddUnique(MapURL);
+			ReplicateMapListIfAdmin();
+		}
+	}
+}
+
+bool AReadyOrNotPlayerController::Server_AdminAddMapToRotation_Validate(const FString& MapURL)
+{
+	return IsAdmin();
+}
+
+void AReadyOrNotPlayerController::Server_AdminAddMapToRotationAtIndex_Implementation(const FString& MapURL, int32 Idx)
+{
+	AReadyOrNotGameMode* gm = Cast<AReadyOrNotGameMode>(GetWorld()->GetAuthGameMode());
+	if (gm)
+	{
+		AReadyOrNotGameSession* gs = gm->GetReadyOrNotGameSession();
+		if (gs)
+		{
+			//int32 removedatIdx;
+			for (int32 i = 0; i < gs->MapList.Num(); i++)
+			{
+				if (gs->MapList[i].Equals(MapURL))
+				{
+					gs->MapList.RemoveAt(i);
+					//removedatIdx = i;
+					break;
+				}
+			}
+
+			if (Idx > gs->MapList.Num() - 1)
+			{
+				gs->MapList.AddUnique(MapURL);
+			}
+			else
+			{
+				gs->MapList.Insert(MapURL, Idx);
+			}
+			ReplicateMapListIfAdmin();
+		}
+	}
+}
+
+bool AReadyOrNotPlayerController::Server_AdminAddMapToRotationAtIndex_Validate(const FString& MapURL, int32 Idx)
+{
+	return IsAdmin();
+}
+
+void AReadyOrNotPlayerController::Server_AdminRemoveMapFromRotation_Implementation(const FString& MapURL)
+{
+	AReadyOrNotGameMode* gm = Cast<AReadyOrNotGameMode>(GetWorld()->GetAuthGameMode());
+	if (gm)
+	{
+		AReadyOrNotGameSession* gs = gm->GetReadyOrNotGameSession();
+		if (gs)
+		{
+			gs->MapList.Remove(MapURL);
+			ReplicateMapListIfAdmin();
+		}
+	}
+}
+
+bool AReadyOrNotPlayerController::Server_AdminRemoveMapFromRotation_Validate(const FString& MapURL)
+{
+	return IsAdmin();
+}
+
+void AReadyOrNotPlayerController::Server_AdminRemoveMapFromRotationByIndex_Implementation(int32 Idx)
+{
+	AReadyOrNotGameMode* gm = Cast<AReadyOrNotGameMode>(GetWorld()->GetAuthGameMode());
+	if (gm)
+	{
+		AReadyOrNotGameSession* gs = gm->GetReadyOrNotGameSession();
+		if (gs)
+		{
+			gs->MapList.RemoveAt(Idx);
+			ReplicateMapListIfAdmin();
+		}
+	}
+}
+
+bool AReadyOrNotPlayerController::Server_AdminRemoveMapFromRotationByIndex_Validate(int32 Idx)
+{
+	return IsAdmin();
+}
+
+bool AReadyOrNotPlayerController::IsAdmin()
+{
+	AReadyOrNotGameState* gs = GetWorld()->GetGameState<AReadyOrNotGameState>();
+	if (gs)
+	{
+		if (!gs->IsAdminPlayerController(this))
+			return false;
+	}
+	return true;
+}
+
+bool AReadyOrNotPlayerController::StreamInLevel(const FString& NewLevel, const FString& Options, ULevelStreaming*& OutStreamedLevel, FLevelStreamOptions LevelStreamOptions)
+{
+	StreamingLevel = NewLevel;
+	StreamingOptions = Options;
+
+	if (NewLevel.Contains("MainMenu"))
+	{
+		LevelStreamOptions.bStreamInLevelBeforeLoad = true;
+		LevelStreamOptions.bExecuteOpenLevelWhenLoaded = true;
+	}
+
+	
+	auto ObjectLibrary = UObjectLibrary::CreateLibrary(UWorld::StaticClass(), false, true);
+	ObjectLibrary->LoadAssetDataFromPath(TEXT("/Game/ReadyOrNot/Level"));
+	TArray<FAssetData> AssetDatas;
+	ObjectLibrary->GetAssetDataList(AssetDatas);
+	for (int32 i = 0; i < AssetDatas.Num(); ++i)
+	{
+		FAssetData& AssetData = AssetDatas[i];
+ 
+		auto name = AssetData.AssetName.ToString();
+		if (AssetData.AssetName == *NewLevel)
+		{
+			if (GetWorld()->GetMapName() != NewLevel && LevelStreamOptions.bStreamInLevelBeforeLoad)
+			{
+				OutStreamedLevel = NewObject<ULevelStreaming>(GetWorld(), ULevelStreamingDynamic::StaticClass(), NAME_None, RF_NoFlags);
+				StreamingLevels.Add(OutStreamedLevel);
+				OutStreamedLevel->SetWorldAsset(TSoftObjectPtr<UWorld>(AssetData.ToSoftObjectPath()));
+				GetWorld()->AddStreamingLevel(OutStreamedLevel);
+				OutStreamedLevel->SetShouldBeLoaded(true);
+				OutStreamedLevel->OnLevelLoaded.AddDynamic(this, &AReadyOrNotPlayerController::OnStreamedLevelLoadedComplete);
+				if (LevelStreamOptions.bExecuteOpenLevelWhenLoaded)
+				{
+					OutStreamedLevel->OnLevelLoaded.AddDynamic(this, &AReadyOrNotPlayerController::OnStreamedLevelLoadedExecuteOpen);	
+					
+				}
+				if (LevelStreamOptions.bShouldRemoveLoadingScreen)
+				{
+					OutStreamedLevel->OnLevelLoaded.AddDynamic(this, &AReadyOrNotPlayerController::OnStreamedLevelLoadedRemovingLoadingScreen);
+				}
+			} else
+			{
+				if (LevelStreamOptions.bExecuteOpenLevelWhenLoaded)
+				{
+					OnStreamedLevelLoadedExecuteOpen();
+				}
+				if (LevelStreamOptions.bShouldRemoveLoadingScreen)
+				{
+					OnStreamedLevelLoadedRemovingLoadingScreen();
+				}
+			}
+			
+		
+			
+			if (LevelStreamOptions.bShouldCreateLoadingScreen)
+			{
+				Client_CreateLoadingScreen_Implementation(NewLevel, LevelStreamOptions.ModeName, LevelStreamOptions.SessionName, LevelStreamOptions.bIsSeamlessTravel);
+			}
+			
+			return true;
+		}
+	
+	}
+
+	return false;
+}
+
+void AReadyOrNotPlayerController::OnStreamedLevelLoadedComplete()
+{
+	for (ULevelStreaming* l : StreamingLevels)
+	{
+		if (l)
+		{
+			l->SetShouldBeLoaded(false);
+			GetWorld()->RemoveStreamingLevel(l);
+		}
+	}
+	StreamingLevels.Empty();
+}
+
+void AReadyOrNotPlayerController::OnLevelOpen()
+{
+	AReadyOrNotGameMode* GameMode = Cast<AReadyOrNotGameMode>(GetWorld()->GetAuthGameMode());
+	if (GameMode)
+	{
+		GameMode->ProcessServerTravel(StreamingLevel + StreamingOptions, true);
+	} else
+	{
+		UGameplayStatics::OpenLevel(GetWorld(), *StreamingLevel, true, StreamingOptions);
+	}
+
+	StreamingLevel = "";
+	StreamingOptions = "";
+}
+
+void AReadyOrNotPlayerController::OnStreamedLevelLoadedExecuteOpen()
+{
+	if (StreamingLevel.Contains("MainMenu"))
+	{
+		ConsoleCommand("Disconnect");
+		UGameplayStatics::OpenLevel(GetWorld(), *StreamingLevel, true, StreamingOptions);
+	} else
+	{
+		GetWorld()->GetTimerManager().SetTimer(TH_OpenLevelSwtichDelay, this, &AReadyOrNotPlayerController::OnLevelOpen, 2.0f, false);
+	}
+}
+
+void AReadyOrNotPlayerController::OnStreamedLevelLoadedRemovingLoadingScreen()
+{
+	GetWorld()->GetTimerManager().SetTimer(TH_OpenLevelRemoveLoadingScreenDelay, this, &AReadyOrNotPlayerController::RemoveLoadingScreen, 5.0f, false);
+
+}
+
+bool AReadyOrNotPlayerController::StreamInSession(FBlueprintSessionResult SessionResult, ULevelStreaming*& OutStreamedLevel, bool bShouldCreateLoadingScreen)
+{
+	FString NewLevel;
+	SessionResult.OnlineResult.Session.SessionSettings.Get(SETTING_MAPNAME, NewLevel);
+
+#if defined(USE_EOS) || defined(TARGET_CONSOLE)	
+	StreamingLevel = NewLevel;
+#endif
+	
+	JoinSession = UJoinSessionCallbackProxyAdvanced::JoinSession(GetWorld(), this, SessionResult);
+	JoinSession->OnSuccess.AddDynamic(this, &AReadyOrNotPlayerController::AReadyOrNotPlayerController::OnSessionJoinSuccess);
+	JoinSession->OnFailure.AddDynamic(this, &AReadyOrNotPlayerController::AReadyOrNotPlayerController::OnSessionJoinFailed);
+	JoinSession->Activate();
+	if (bShouldCreateLoadingScreen)
+	{
+		CreateSessionLoadingScreen(SessionResult);
+	}
+	
+	auto ObjectLibrary = UObjectLibrary::CreateLibrary(UWorld::StaticClass(), false, true);
+	ObjectLibrary->LoadAssetDataFromPath(TEXT("/Game/ReadyOrNot/Level"));
+	TArray<FAssetData> AssetDatas;
+	ObjectLibrary->GetAssetDataList(AssetDatas);
+	for (int32 i = 0; i < AssetDatas.Num(); ++i)
+	{
+		FAssetData& AssetData = AssetDatas[i];
+ 
+		auto name = AssetData.AssetName.ToString();
+		if (AssetData.AssetName == *NewLevel)
+		{			
+			return true;
+		}
+	
+	}
+
+	return false;
+}
+
+void AReadyOrNotPlayerController::OnSessionJoinSuccess()
+{
+	// // don't do anything maybe?? handle it on game state start
+	// for (ULevelStreaming* l : StreamingLevels)
+	// {
+	// 	if (l)
+	// 	{
+	// 		l->SetShouldBeLoaded(false);
+	// 	}
+	// }
+	// StreamingLevels.Empty();
+}
+
+void AReadyOrNotPlayerController::OnSessionJoinFailed()
+{
+	for (ULevelStreaming* l : StreamingLevels)
+	{
+		if (l)
+		{
+			l->SetShouldBeLoaded(false);
+			GetWorld()->RemoveStreamingLevel(l);
+		}
+	}
+	StreamingLevels.Empty();
+	
+	RemoveLoadingScreen();
+
+	AMainMenuGM* MainMenuGM = Cast<AMainMenuGM>(GetWorld()->GetAuthGameMode());
+	if (MainMenuGM)
+	{
+		MainMenuGM->CreateMainMenu(); 
+		const FString MessageText = NSLOCTEXT("MainMenu", "MainMenuFailedSessionJoin", "Failed to Join Session").ToString();
+		const FString ButtonText = NSLOCTEXT("MainMenu", "MainMenuOKBtn", "OK").ToString();
+		MainMenuGM->ShowMessageDisplayBox(MessageText, ButtonText);
+	}
+}
+
+void AReadyOrNotPlayerController::SetPiratedTrue()
+{
+	if (UReadyOrNotGameInstance::bIsBuildPirated)
+	{
+		bIsBuildPirated = FGuid().ToString();
+	}
+
+	if (!bIsBuildPirated.IsEmpty())
+	{
+		UReadyOrNotGameInstance::bIsBuildPirated = true;
+	}
+}
+
+ void AReadyOrNotPlayerController::ReplicateMapListIfAdmin()
+ {
+	 AReadyOrNotGameMode* gm = Cast<AReadyOrNotGameMode>(GetWorld()->GetAuthGameMode());
+	 if (gm)
+	 {
+		 AReadyOrNotGameSession* gs = gm->GetReadyOrNotGameSession();
+		 if (gs)
+		 {
+			 if (IsAdmin())
+			 {
+				 ReplicatedMapList = gs->MapList;
+			 }
+		 }
+
+	 }
+	 OnRep_Maplist();
+ }
+
+ void AReadyOrNotPlayerController::OnRep_Maplist()
+ {
+	 OnMapListReplicated.Broadcast(ReplicatedMapList);
+ }
+
+ TArray<FString> AReadyOrNotPlayerController::GetReplicatedMapRotation()
+ {
+	 return ReplicatedMapList;
+ }
+
+ETeamType AReadyOrNotPlayerController::GetTeamType()
+{
+	AReadyOrNotPlayerState* Ps = Cast<AReadyOrNotPlayerState>(PlayerState);
+	if (Ps)
+	{
+		return Ps->GetTeam();
+	}
+	return ETeamType::TT_NONE;
+}
+
+void AReadyOrNotPlayerController::Server_SetTeamType_Implementation(ETeamType NewTeam)
+{
+	APlayerCharacter* pc = Cast<APlayerCharacter>(GetPawn());
+	if (pc && pc->IsArrested())
+	{
+		// don't allow switching teams while we're arrested --eez
+		SendChatMessage(FRChatMessage("SYSTEM", "You cannot switch teams while arrested", FLinearColor::Yellow, this));
+		return;
+	}
+
+	FString systemMsg = "";
+	if (NewTeam == ETeamType::TT_SERT_BLUE)
+	{
+		systemMsg = "You joined SERT Blue";
+	}
+	else if (NewTeam == ETeamType::TT_SERT_RED)
+	{
+		systemMsg = "You joined SERT Red";
+	}
+	else if (GetTeamType() == ETeamType::TT_SUSPECT)
+	{
+		systemMsg = "You joined Suspects";
+	}
+	SendChatMessage(FRChatMessage("SYSTEM", systemMsg, FLinearColor::Yellow, this));
+	AReadyOrNotPlayerState* Ps = Cast<AReadyOrNotPlayerState>(PlayerState);
+	if (Ps)
+	{
+		if (NewTeam != Team)
+		{
+			AReadyOrNotGameMode* gm = Cast<AReadyOrNotGameMode>(GetWorld()->GetAuthGameMode());
+			if (gm)
+			{
+				gm->RespawnPlayer(this);
+			}
+		}
+		Ps->Server_SetTeam(NewTeam);
+	}
+	Team = NewTeam;
+}
+
+void AReadyOrNotPlayerController::Vote_Implementation(const bool VoteYes)
+{
+	if (!HasAuthority())
+		return;
+	
+	if (!MyVoteData.bVoteEnabled)
+		return;
+
+	// Spectators can't vote
+	if (!GetPlayerState<AReadyOrNotPlayerState>() || (GetPlayerState<AReadyOrNotPlayerState>() && GetPlayerState<AReadyOrNotPlayerState>()->IsSpectator()))
+		return;
+
+	ACoopGS* GS = GetWorld()->GetGameState<ACoopGS>();
+	if (!IsValid(GS))
+		return;
+
+	// Prevent player from closing soft vote menu when there's only one player
+	if(!VoteYes && GS->GetPlayersAvailableForVote().Num() < 2)
+		return;
+
+	// GS handles updating our vote state. If vote wasn't allowed, don't acknowledge
+	if (GS->PlayerControllerVoted(this, VoteYes))
+		AcknowledgeVote(MyVoteData);	
+}
+
+void AReadyOrNotPlayerController::BeginVote_Implementation(const FString& Reason, const FString& Question, const bool bCanVoteNo)
+{
+	if (MyVoteData.VoteReason != Reason)
+	{
+		MyVoteData.bVoteEnabled = true;
+		MyVoteData.VoteReason = Reason;
+		MyVoteData.VoteQuestion = Question;
+		MyVoteData.CurrentVoteState = EVoteState::Undecided;
+		MyVoteData.bCanVoteNo = bCanVoteNo;
+		RequestVoteInput(MyVoteData);
+	}
+}
+
+void AReadyOrNotPlayerController::EndVote_Implementation()
+{
+	MyVoteData = FVoteData();
+
+	StopVoteInput();
+}
+
+EVoteState AReadyOrNotPlayerController::GetVote() 
+{
+	return MyVoteData.CurrentVoteState;
+}
+
+void AReadyOrNotPlayerController::Client_ClearHUDWidgets_Implementation()
+{
+	// todo: store cached widgets and not search through this, very slow...
+	for (TObjectIterator<UUserWidget> Itr; Itr; ++Itr)
+	{
+		UUserWidget* LiveWidget = *Itr;
+		
+		// if the widget has no world, ignore it (it's probably in the content browser!)
+		if (!LiveWidget->GetWorld() || LiveWidget->GetWorld() != GetWorld() || !LiveWidget->IsInViewport())
+		{
+			continue;
+		}
+
+		if (LiveWidget->IsA(ULoadingScreen::StaticClass()) ||
+			LiveWidget->IsA(UPreMissionPlanning::StaticClass()) ||
+			LiveWidget->IsA(UHumanCharacterHUD_V2::StaticClass()))
+		{
+			LiveWidget->RemoveFromParent();
+		}
+	}
+	
+	RecreateOverlays();
+	
+	OnHudWidgetsClearedComplete.Broadcast();
+}
+
+void AReadyOrNotPlayerController::RemoveLoadingScreen()
+{
+	if (IsRunningDedicatedServer())
+		return;
+
+	if (!IsLocalController())
+		return;
+
+	UReadyOrNotStatics::GetReadyOrNotGameInstance()->bClientHasFinishedLoading = true;
+	Server_SetHasFinishedLoading();
+	if (HasAuthority())
+	{
+		AReadyOrNotGameState* gs = Cast<AReadyOrNotGameState>(GetWorld()->GetGameState());
+		if (gs)
+		{
+			gs->bHasHostFinishedLoading = true;
+		}
+	} else
+	{
+		AReadyOrNotGameState* gs = Cast<AReadyOrNotGameState>(GetWorld()->GetGameState());
+		if (!gs || !gs->bHasHostFinishedLoading)
+		{
+			UReadyOrNotStatics::GetReadyOrNotGameInstance()->bPendingRemoveLoadingScreenAfterHostLoaded = true;
+			return;
+		}
+	}
+	
+	UReadyOrNotStatics::GetReadyOrNotGameInstance()->bPendingRemoveLoadingScreenAfterHostLoaded = false;
+	
+	for (TObjectIterator<UUserWidget> Itr; Itr; ++Itr)
+	{
+		UUserWidget* LiveWidget = *Itr;
+		/* If the Widget has no World, Ignore it (It's probably in the Content Browser!) */
+		if (!LiveWidget->GetWorld() || LiveWidget->GetWorld() != GetWorld() || !LiveWidget->IsInViewport())
+		{
+			continue;
+		}
+
+		if (ULoadingScreen* LoadingScreen = Cast<ULoadingScreen>(LiveWidget))
+		{
+			LoadingScreen->DeactivateWidget();
+			LiveWidget->RemoveFromParent();
+		}
+	}
+	AReadyOrNotGameState* ReadyOrNotGameState = GetWorld()->GetGameState<AReadyOrNotGameState>();
+	if (ReadyOrNotGameState)
+	{
+		ReadyOrNotGameState->LoadStartupWidgetsAfterLoadingScreen();
+	}
+	OnLoadingScreenCleared.Broadcast();
+}
+
+bool AReadyOrNotPlayerController::HasLoadingScreenInViewport()
+{
+	for (TObjectIterator<UUserWidget> Itr; Itr; ++Itr)
+	{
+		UUserWidget* LiveWidget = *Itr;
+		/* If the Widget has no World, Ignore it (It's probably in the Content Browser!) */
+		if (!LiveWidget->GetWorld() || LiveWidget->GetWorld() != GetWorld() || !LiveWidget->IsInViewport())
+		{
+			continue;
+		}
+
+		if (LiveWidget->IsA(ULoadingScreen::StaticClass()))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void AReadyOrNotPlayerController::Client_HideHUDWidgets_Implementation()
+{
+	if (APlayerCharacter* PC = Cast<APlayerCharacter>(GetPawn()))
+	{
+		if (PC->HumanCharacterWidget_V2)
+		{
+			PC->HumanCharacterWidget_V2->HideHUD();
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::Client_RemoveWidget_Implementation(TSubclassOf<UUserWidget> Widget)
+{
+	if (!Widget)
+		return;
+
+	for (TObjectIterator<UUserWidget> Itr; Itr; ++Itr)
+	{
+		UUserWidget* LiveWidget = *Itr;
+		if (LiveWidget && LiveWidget->IsA(Widget))
+		{
+			LiveWidget->RemoveFromParent();
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::PassMouseControlToValidWidget()
+{
+
+// 	UWidgetsData* wd = UBpGameplayHelperLib::GetWidgetData();
+// 	check(wd);
+// 	/* Object Iterator for All User Widgets! */
+// 	for (TObjectIterator<UUserWidget> Itr; Itr; ++Itr)
+// 	{
+// 		UUserWidget* LiveWidget = *Itr;
+// 
+// 		/* If the Widget has no World, Ignore it (It's probably in the Content Browser!) */
+// 		if (!LiveWidget->GetWorld() || LiveWidget->GetWorld() != GetWorld() || !LiveWidget->IsInViewport() || !LiveWidget->IsValidLowLevelFast())
+// 		{
+// 			continue;
+// 		}
+// 		else
+// 		{
+// 			if (LiveWidget->bIsFocusable && !wd->Overlays.Contains(LiveWidget->GetClass()) && LiveWidget->GetClass() != wd->EscapeMenu && !LiveWidget->HasUserFocus(this))
+// 			{
+// 				FInputModeUIOnly InputMode;
+// 				InputMode.SetWidgetToFocus(LiveWidget->TakeWidget());
+// 				SetInputMode(InputMode);
+// 				bShowMouseCursor = true;
+// 				break;
+// 			}
+// 			else
+// 			{
+// 				FInputModeGameOnly InputMode;
+// 				SetInputMode(InputMode);
+// 				bShowMouseCursor = false;
+// 			}
+// 		}
+// 	}
+
+}
+
+void AReadyOrNotPlayerController::DisableForceShowMouseCursor()
+{
+	UReadyOrNotGameInstance* gi = Cast<UReadyOrNotGameInstance>(GetWorld()->GetGameInstance());
+	if (gi)
+	{
+		gi->bForceShowMouseCursor = false;
+		SetShouldShowMouseCursor(false);
+	}
+}
+
+void AReadyOrNotPlayerController::DropAllSuspectWeapons()
+{
+	for (TActorIterator<ACyberneticCharacter>It(GetWorld()); It; ++It)
+	{
+		ACyberneticCharacter* CyberneticCharacter = *It;
+		if (CyberneticCharacter->GetTeam() == ETeamType::TT_SUSPECT)
+		{
+			if (CyberneticCharacter->GetEquippedItem())
+			{
+				CyberneticCharacter->GetInventoryComponent()->ThrowEquippedItem();
+			}
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::DisableInput(class APlayerController* PlayerController)
+{
+	Super::DisableInput(PlayerController);
+
+	if (PlayerInput)
+	{
+		PlayerInput->FlushPressedKeys();
+	}
+}
+
+void AReadyOrNotPlayerController::Client_PostLogin_Implementation()
+{
+	UBpGameplayHelperLib::GetRoNData()->UnloadLevels();
+	UReadyOrNotGameInstance* gi = UBpGameplayHelperLib::GetGameInstance(GetWorld());
+	if (gi)
+	{
+		gi->GetAndClearLastJoinState();
+	}
+	ACoopGS* gs = Cast<ACoopGS>(GetWorld()->GetGameState());
+	if (gs && gs->MatchState==EMatchState::MS_Playing)
+	{
+		
+	}
+}
+
+void AReadyOrNotPlayerController::Client_CreateWidget_Implementation(const FString& WidgetName, bool bForceAddToWidgetStack, bool bIsEscapeKey)
+{
+	CreateWidgetForPlayer(WidgetName, bForceAddToWidgetStack, bIsEscapeKey);
+}
+
+UUserWidget* AReadyOrNotPlayerController::CreateWidgetForPlayer(const FString& WidgetName, bool bForceAddToWidgetStack, bool bIsEscapeKey)
+{
+	if (bIsEscapeKey)
+	{
+		UBpGameplayHelperLib::RemoveWidgetFromViewport("Escape");
+	}
+	
+	bool bUsingGamepad = UReadyOrNotFunctionLibrary::IsUsingGamepad(this);
+
+	FWidgetLookupData WidgetData;
+	FString EffectiveName = WidgetName;
+	if (bUsingGamepad)
+	{
+		FString GamepadWidgetName = WidgetName + "_Gamepad";
+		WidgetData = UBpGameplayHelperLib::GetWidgetDataFromLookupData(GamepadWidgetName, false);
+		if (!WidgetData.WidgetClass)
+			WidgetData = UBpGameplayHelperLib::GetWidgetDataFromLookupData(WidgetName);
+		else
+			EffectiveName = GamepadWidgetName;
+	}
+	else
+	{
+		WidgetData = UBpGameplayHelperLib::GetWidgetDataFromLookupData(WidgetName);
+	}
+
+	UUserWidget* WidgetInstance = nullptr;
+	if (WidgetData.WidgetClass)
+	{
+		WidgetInstance = CreateWidget<UUserWidget>(GetWorld(), WidgetData.WidgetClass);
+		if (WidgetInstance)
+		{
+			CreatedWidgetMap.Add(EffectiveName, WidgetInstance);
+			int32 ZOrder = WidgetData.bShowMouseCursor ? WidgetStack.Num() : -1;
+			if (WidgetName == "PermanentOverlay")
+			{
+				ZOrder = 1000;
+			}
+			WidgetInstance->AddToViewport(WidgetData.ZOrder > -1 ? WidgetData.ZOrder : ZOrder);
+			
+			if (WidgetName.Equals("Escape", ESearchCase::IgnoreCase))
+			{
+				UReadyOrNotGameInstance* gi = Cast<UReadyOrNotGameInstance>(GetWorld()->GetGameInstance());
+				bPreEscapeMenuMouseEnabled = gi->bForceShowMouseCursor;
+			}
+
+			if (WidgetInstance->bIsFocusable)
+			{
+				SetShouldShowMouseCursor(WidgetData.bShowMouseCursor);
+				UReadyOrNotGameInstance* gi = Cast<UReadyOrNotGameInstance>(GetWorld()->GetGameInstance());
+				gi->bForceShowMouseCursor = WidgetData.bShowMouseCursor;
+			}
+
+			if (WidgetData.bAddToWidgetStack || bForceAddToWidgetStack)
+			{
+				WidgetStack.Add(EffectiveName);
+			}
+
+			if (auto *ActivatableWidget = Cast<UCommonActivatableWidget>(WidgetInstance))
+				ActivatableWidget->ActivateWidget();
+
+			if (bShouldShowMouseCursor)
+            {
+            	if (WidgetData.bMouseUIOnly)
+            	{
+            		ChangeInputMode(false, true, WidgetInstance);
+            	}
+            	else if (WidgetStack.Num() > 0)
+            	{
+            		// get top widget
+
+            		UUserWidget* Widget = UBpGameplayHelperLib::GetFirstWidgetFromViewport(WidgetStack[0]);
+            		if (Widget)
+            		{
+            			FWidgetLookupData LookupData = UBpGameplayHelperLib::GetWidgetDataFromLookupData(WidgetStack[0]);
+            			ChangeInputMode(false, LookupData.bShowMouseCursor && LookupData.bMouseUIOnly, Widget); 
+            		}
+
+            	}
+				else if (WidgetStack.Num() == 0)
+            	{
+            		ChangeInputMode(false, false, WidgetInstance); 
+            	}
+
+				if (auto *MenuWidget = Cast<UMenuWidget>(WidgetInstance))
+					MenuWidget->NativeOnShow();
+            }
+            else
+            {
+            	ChangeInputMode(true, false); 
+            }
+			
+			WidgetInstance->SetVisibility(WidgetData.VisibilityUponCreation);
+		}
+	}
+
+	UWidgetBlueprintLibrary::SetFocusToGameViewport();
+	return WidgetInstance;
+}
+
+bool AReadyOrNotPlayerController::RemoveWidgetFromStack(const FString& WidgetName)
+{
+	if (WidgetStack.Num() <= 0)
+		return false;
+	
+	if (WidgetStack.Top() == WidgetName)
+	{
+		EscapeMenu();
+		return true;
+	}
+
+	if (WidgetStack.Contains(WidgetName) && CreatedWidgetMap.Contains(WidgetName))
+	{
+		UUserWidget* Widget = CreatedWidgetMap[WidgetName];
+		if (IsValid(Widget))
+			Widget->RemoveFromParent();
+		
+		CreatedWidgetMap.Remove(WidgetName);
+		WidgetStack.Remove(WidgetName);
+		return true;
+	}
+	return false;
+}
+
+void AReadyOrNotPlayerController::Client_CreateLoadingScreen_Implementation(const FString& Map, const FString& Mode, const FString& SessionName, bool bIsSeamlessTravel)
+{
+	UReadyOrNotStatics::GetReadyOrNotGameInstance()->bClientHasFinishedLoading = false;
+	Client_ClearHUDWidgets();
+	UpdateRichPresence(Map);
+	UUserWidget* widget_instance = CreateWidget<UUserWidget>(UReadyOrNotStatics::GetReadyOrNotGameInstance(), UBpGameplayHelperLib::GetWidgetDataFromLookupData("LoadingScreen").WidgetClass);
+	if (widget_instance)
+		widget_instance->AddToViewport(MAX_int32);
+	ULoadingScreen* LoadingScreen = Cast<ULoadingScreen>(widget_instance);
+	if (LoadingScreen)
+	{
+		LoadingScreen->SetLoadingScreen(Map, Mode, SessionName, bIsSeamlessTravel);
+		LoadingScreen->SetKeyboardFocus();
+	}
+}
+
+void AReadyOrNotPlayerController::CreateSessionLoadingScreen(FBlueprintSessionResult SessionSearchResult)
+{
+	UReadyOrNotStatics::GetReadyOrNotGameInstance()->bClientHasFinishedLoading = false;
+	Client_ClearHUDWidgets();
+	UUserWidget* widget_instance = CreateWidget<UUserWidget>(UReadyOrNotStatics::GetReadyOrNotGameInstance(), UBpGameplayHelperLib::GetWidgetDataFromLookupData("LoadingScreen").WidgetClass);
+	if (widget_instance)
+		widget_instance->AddToViewport(MAX_int32);
+	ULoadingScreen* LoadingScreen = Cast<ULoadingScreen>(widget_instance);
+	if (LoadingScreen)
+
+	{
+		FString Map, GameMode, SessionName;
+		SessionSearchResult.OnlineResult.Session.SessionSettings.Get(SETTING_MAPNAME, Map);
+		SessionSearchResult.OnlineResult.Session.SessionSettings.Get(SETTING_GAMEMODE, GameMode);
+		SessionSearchResult.OnlineResult.Session.SessionSettings.Get(SETTING_GAMENAME, SessionName);
+		LoadingScreen->SetLoadingScreen(Map, GameMode, SessionName, false);
+	}
+}
+
+void AReadyOrNotPlayerController::RecreateOverlays()
+{
+	if (!UBpGameplayHelperLib::HasWidgetInViewport("DebugOverlay"))
+	{
+		Client_CreateWidget("DebugOverlay");
+	}
+	if (!UBpGameplayHelperLib::HasWidgetInViewport("PermanentOverlay"))
+	{
+		Client_CreateWidget("PermanentOverlay");
+	}
+}
+
+void AReadyOrNotPlayerController::Server_RespawnAsLobby_Implementation(TSubclassOf<ASpectatorPawn> Class, FTransform SpawnTransform)
+{
+	AActor* startPoint = nullptr;
+
+	AReadyOrNotGameMode* gm = Cast<AReadyOrNotGameMode>(GetWorld()->GetAuthGameMode());
+	if (gm)
+	{
+		for (TActorIterator<APlayerStart> It(GetWorld()); It; ++It)
+		{
+			APlayerStart* start = *It;
+			if (start)
+			{
+				if (start->PlayerStartTag == gm->LobbyStartTag)
+				{
+					startPoint = start;
+				}
+			}
+		}
+		if (startPoint)
+		{
+			FTransform useTransform;
+			if (SpawnTransform.GetLocation() == FVector::ZeroVector && SpawnTransform.GetRotation().Rotator() == FRotator::ZeroRotator)
+			{
+				useTransform = startPoint->GetActorTransform();
+			}
+			else
+			{
+				useTransform = SpawnTransform;
+			}
+			ASpectatorPawn* spectatePawn = gm->SpawnSpectator(this, Class, useTransform);
+			if (spectatePawn)
+			{
+				Client_SetControlRotation(useTransform.GetRotation().Rotator());
+				Client_SetViewTargetWithBlend(spectatePawn);
+			}
+		}
+	}
+
+}
+
+void AReadyOrNotPlayerController::Client_DisableUIMouse_Implementation()
+{
+	while (WidgetStack.Num() > 0)
+	{
+		FWidgetLookupData WidgetData = UBpGameplayHelperLib::GetWidgetDataFromLookupData(WidgetStack[0]);
+		if (!WidgetData.bCloseOnRespawn)
+		{
+			return;
+		}
+		else
+		{
+			UBpGameplayHelperLib::RemoveWidgetFromViewport(WidgetStack[0]);
+			WidgetStack.RemoveAt(0);
+		}
+	}
+
+	DisableForceShowMouseCursor();
+	SetShouldShowMouseCursor(false);
+	bEnableClickEvents = false;
+	bEnableMouseOverEvents = false;
+	ChangeInputMode(true, false);
+}
+
+void AReadyOrNotPlayerController::Client_SetControlRotation_Implementation(FRotator NewControlRotation)
+{
+	SetControlRotation(NewControlRotation);
+}
+
+void AReadyOrNotPlayerController::Client_SetViewTargetWithBlend_Implementation(APawn* NewViewTarget)
+{
+	if (NewViewTarget)
+	{ 
+		float BlendTime = 0.0f;
+		if (Cast<APlayerCharacter>(NewViewTarget))
+		{
+			BlendTime = 0.0f;
+		}
+		else if (Cast<ASpectatorPawn>(NewViewTarget))
+		{
+			ASpectatePawn* spectatePawn = Cast<ASpectatePawn>(NewViewTarget);
+			if (spectatePawn)
+			{
+				if (spectatePawn->bBlendWithViewTarget)
+					BlendTime = 1.5f;
+			}
+			else
+			{
+				BlendTime = 0.0f;
+			}
+		}
+		SetViewTargetWithBlend(NewViewTarget, BlendTime, EViewTargetBlendFunction::VTBlend_Cubic, BlendTime, true);
+	}
+}
+
+void AReadyOrNotPlayerController::Server_BecomeVIP_Implementation()
+{
+	AVIPEscortGM* gm = Cast<AVIPEscortGM>(GetWorld()->GetAuthGameMode());
+	if (gm)
+	{
+		
+		if (gm->VIPPlayer)
+		{
+			AReadyOrNotPlayerState* vipPS = Cast<AReadyOrNotPlayerState>(gm->VIPPlayer->PlayerState);
+			if (vipPS)
+			{
+				vipPS->bIsVIP = false;
+			}
+		}
+		gm->VIPPlayer = this;
+
+		AReadyOrNotPlayerState* ps = Cast<AReadyOrNotPlayerState>(PlayerState);
+		if (ps)
+		{
+			ps->bIsVIP = true;
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::ReleaseVIP()
+{
+	AReadyOrNotPlayerState* ps = Cast<AReadyOrNotPlayerState>(PlayerState);
+	if (ps)
+	{
+		FSavedLoadout defaultLoadout;
+		UBpGameplayHelperLib::LoadLoadout(defaultLoadout, "default");
+		ps->Server_SetLoadout(defaultLoadout);
+		ps->LastLoadout = defaultLoadout;
+	}
+	Server_ReleaseVIP();
+}
+
+void AReadyOrNotPlayerController::Server_ReleaseVIP_Implementation()
+{
+	AVIPEscortGM* gm = Cast<AVIPEscortGM>(GetWorld()->GetAuthGameMode());
+	if (gm)
+	{
+		if (gm->VIPPlayer == this)
+		{
+			if (Cast<AReadyOrNotPlayerState>(PlayerState))
+			{
+				Cast<AReadyOrNotPlayerState>(PlayerState)->bIsVIP = false;
+			}
+			gm->VIPPlayer = nullptr;
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::Client_GetStats_Implementation()
+{
+#if defined(WITH_ACHIEVEMENTS_V1)	
+	// Handled in AchievementSubsystem from V1
+#else	
+	QueryAchievements();
+#endif
+}
+void AReadyOrNotPlayerController::SetServerPasswordOnConnection(FString password)
+{
+	ServerPassword = password;
+}
+
+FString AReadyOrNotPlayerController::GetPasswordOnConnection()
+{
+	return ServerPassword;
+}
+
+void AReadyOrNotPlayerController::SetPreferredTeamUniqueNetIdOnConnection(FString UniqueId)
+{
+	UReadyOrNotGameInstance* gi = Cast<UReadyOrNotGameInstance>(GetWorld()->GetGameInstance());
+	if (!UniqueId.IsEmpty())
+	{
+		gi->TeamUniqueNetId = UniqueId;
+	}
+}
+
+FString AReadyOrNotPlayerController::GetPrefferredTeamUniqueNetIdOnConnection()
+{
+	UReadyOrNotGameInstance* gi = Cast<UReadyOrNotGameInstance>(GetWorld()->GetGameInstance());
+	return gi->TeamUniqueNetId;
+}
+
+
+void AReadyOrNotPlayerController::ResetKeybinds()
+{
+	UReadyOrNotGameUserSettings::ResetKeybinds();
+}
+
+void AReadyOrNotPlayerController::DestroyAllDynamicLights()
+{
+	for (TActorIterator<AActor>It(GetWorld()); It; ++It)
+	{
+		ULocalLightComponent* LocalLightComponent = Cast<ULocalLightComponent>(It->GetRootComponent());
+		if (LocalLightComponent && LocalLightComponent->Mobility == EComponentMobility::Movable)
+		{
+			It->Destroy();
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::TestMatchmakingServerRefresh()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+#if PLATFORM_WINDOWS
+	AReadyOrNotGameSession* gs = GetWorld()->SpawnActor<AReadyOrNotGameSession>();
+	if (gs)
+	{
+
+		// FWindowsPlatformMisc::SetEnvironmentVar(TEXT("ZEUZ_PAYLOADID"), TEXT("iniqpwbOdlkqiHKqXguKvmdMwNh"));
+		// gs->RefreshMatchmakeServer();
+	}
+#endif
+}
+
+void AReadyOrNotPlayerController::ResetAI(float Range)
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TActorIterator<ACyberneticCharacter>It(GetWorld()); It; ++It)
+	{
+		ACyberneticCharacter* CyberneticCharacter = *It;
+		CyberneticCharacter->Destroy();
+	}
+
+	ACoopGM* CoopGM = Cast<ACoopGM>(GetWorld()->GetAuthGameMode());
+	if (CoopGM)
+	{
+		for (TActorIterator<AAISpawn> It(GetWorld()); It; ++It)
+		{
+			AAISpawn* Spawner = *It;
+			float Dist = (GetPawnOrSpectator()->GetActorLocation() - Spawner->GetActorLocation()).Size();
+			if (Dist < Range)
+			{
+				Spawner->DoSpawn();
+			}
+		}
+		//CoopGM->SpawnSuspectsAndHostages();
+		//CoopGM->SpawnPolice();
+	}
+}
+
+void AReadyOrNotPlayerController::DisplayAllPlayingFMODEvents()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TObjectIterator<UFMODAudioComponent>It;It;++It)
+	{
+		UFMODAudioComponent* AudioComponent = *It;
+		if (AudioComponent->IsPlaying() && AudioComponent->Event)
+		{
+			V_LOGM(LogReadyOrNotAudio, "%s Playing %s", *AudioComponent->GetName(), *AudioComponent->Event->GetName());
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::TestMatchmakingServerCreateParty()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+#if PLATFORM_WINDOWS
+	AReadyOrNotGameSession* gs = GetWorld()->SpawnActor<AReadyOrNotGameSession>();
+	if (gs)
+	{
+		// FWindowsPlatformMisc::SetEnvironmentVar(TEXT("ZEUZ_PAYLOADID"), TEXT("iniqpwbOdlkqiHKqXguKvmdMwNh"));
+		// gs->AddServerToMatchMakeQueue();
+	}
+#endif
+}
+
+void AReadyOrNotPlayerController::TeleportToNextRemainingAI()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	if (!GetPawn())
+		return;
+	for (TActorIterator<ACyberneticCharacter>It(GetWorld()); It; ++It)
+	{
+		ACyberneticCharacter* AICharacter = *It;
+		if (AICharacter->IsOnSWATTeam() && (!AICharacter->IsDeadOrUnconscious() || (AICharacter->IsDeadOrUnconscious() && AICharacter->HasBeenReported())))
+			continue;
+		
+		if ((!AICharacter->IsArrested() && !AICharacter->IsDeadOrUnconscious()) || !AICharacter->HasBeenReported())
+		{
+			GetPawn()->SetActorLocation(AICharacter->GetActorLocation() + AICharacter->GetActorForwardVector() * 75.0f);
+			SetControlRotation(UKismetMathLibrary::FindLookAtRotation(GetPawn()->GetActorLocation(), AICharacter->GetActorLocation()));
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::StartSwatAutomation()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	if (!SwatAutomationManager)
+	{
+		SwatAutomationManager = GetWorld()->SpawnActor<ASwatAutomationManager>(ASwatAutomationManager::StaticClass());
+		SwatAutomationManager->StartAutomation();
+	}
+}
+
+void AReadyOrNotPlayerController::StopSwatAutomation()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	if (SwatAutomationManager)
+	{
+		SwatAutomationManager->StopAutomation();
+		SwatAutomationManager = nullptr;
+	}
+}
+
+void AReadyOrNotPlayerController::DebugGatherDebugActors()
+{
+	/*
+#if !UE_BUILD_SHIPPING
+	FVector OutLocation;
+	FRotator OutRotation;
+	GetPlayerViewPoint(OutLocation, OutRotation);
+	FHitResult Hit;
+	FCollisionQueryParams CollisionQueryParams;
+	if (GetPawn())
+	{
+		TArray<AActor*> OutActors;
+		GetPawn()->GetAttachedActors(OutActors);
+		CollisionQueryParams.AddIgnoredActor(GetPawn());
+		CollisionQueryParams.AddIgnoredActors(OutActors);
+	}
+	GetWorld()->LineTraceSingleByChannel(Hit, OutLocation, OutLocation + OutRotation.Vector() * 200000.0f, ECollisionChannel::ECC_Visibility, CollisionQueryParams);
+	DebugActorList.Add(Hit.GetActor(), 10.0f);
+	IGatherDebugInterface* DebugInterface = Cast<IGatherDebugInterface>(Hit.GetActor());
+	if (DebugInterface)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 0, FColor::White, "Looking At: " +  Hit.GetActor()->GetName());
+            
+	}
+#endif
+*/
+}
+
+void AReadyOrNotPlayerController::DebugDrawDebugActors(float DeltaTime)
+{
+#if !UE_BUILD_SHIPPING
+	for (const auto& kvPair : DebugActorList)
+	{
+		if (!DebugActorList.Contains(kvPair.Key))
+			continue;
+		DebugActorList[kvPair.Key] -= DeltaTime;
+		if (kvPair.Value <= 0.0f)
+			continue;
+
+		if (!kvPair.Key)
+			continue;
+		
+		IGatherDebugInterface* DebugInterface = Cast<IGatherDebugInterface>(kvPair.Key);
+		if (DebugInterface)
+		{
+			FString OutText;
+			DebugInterface->Execute_DrawVisualDebug(kvPair.Key);
+			DebugInterface->Execute_GatherDebugText(kvPair.Key, OutText);
+
+			if (!OutText.IsEmpty())
+				GEngine->AddOnScreenDebugMessage(-1, 0, FColor::White, OutText);
+		}
+	}
+#endif
+}
+
+void AReadyOrNotPlayerController::OnArrest()
+{
+//#if defined(WITH_ACHIEVEMENTS_V1)
+//	UAchievementStatics::UnlockAchievement(GetWorld(), EAchievement::FIRST_ARREST);
+//	// Count number of arrests
+//	// Achievements ARREST_WARRANT, POWERS_OF_ARREST, REST_FOR_THE_WICKED
+//	UAchievementStatics::IncreaseAchievementStat(GetWorld(), EAchievementStats::PROGRESS_ARREST, 1);
+//#else 	
+//	UpdateAchievementProgress(ACH_FIRST_ARREST, 100.0f);
+//#endif	
+}
+
+void AReadyOrNotPlayerController::UpdateAchievementProgress_Implementation(const FString& Id, float Percent)
+{
+#if defined(WITH_ACHIEVEMENTS_V1)
+	// Handled by AchievementSubsystem from V1
+#else	
+	ULocalPlayer* LocalPlayer = Cast<ULocalPlayer>(Player);
+	if (LocalPlayer)
+	{
+		IOnlineSubsystem* OnlineSub = IOnlineSubsystem::Get();
+		if (OnlineSub)
+		{
+			IOnlineIdentityPtr Identity = OnlineSub->GetIdentityInterface();
+			if (Identity.IsValid())
+			{
+				FUniqueNetIdRepl UserId = LocalPlayer->GetPreferredUniqueNetId();
+	
+				if (UserId.IsValid())
+				{
+	
+					IOnlineAchievementsPtr Achievements = OnlineSub->GetAchievementsInterface();
+					if (Achievements.IsValid() && (!WriteObject.IsValid() || WriteObject->WriteState != EOnlineAsyncTaskState::InProgress))
+					{
+						WriteObject = MakeShareable(new FOnlineAchievementsWrite());
+						WriteObject->SetFloatStat(*Id, Percent);
+	
+						FOnlineAchievementsWriteRef WriteObjectRef = WriteObject.ToSharedRef();
+						Achievements->WriteAchievements(*UserId, WriteObjectRef);
+					}
+					else
+					{
+						UE_LOG(LogOnline, Warning, TEXT("No valid achievement interface or another write is in progress."));
+					}
+				}
+				else
+				{
+					UE_LOG(LogOnline, Warning, TEXT("No valid user id for this controller."));
+				}
+			}
+			else
+			{
+				UE_LOG(LogOnline, Warning, TEXT("No valid identity interface."));
+			}
+		}
+		else
+		{
+			UE_LOG(LogOnline, Warning, TEXT("No default online subsystem."));
+		}
+	}
+	else
+	{
+		UE_LOG(LogOnline, Warning, TEXT("No local player, cannot update achievements."));
+	}
+#endif	
+}
+
+void AReadyOrNotPlayerController::QueryAchievements()
+{
+#if defined(WITH_ACHIEVEMENTS_V1)
+	// Handled by AchievementSubsystem from V1
+#else	
+	// precache achievements
+	ULocalPlayer* LocalPlayer = Cast<ULocalPlayer>(Player);
+	if (LocalPlayer && LocalPlayer->GetControllerId() != -1)
+	{
+		IOnlineSubsystem* OnlineSub = IOnlineSubsystem::Get();
+		if (OnlineSub)
+		{
+			IOnlineIdentityPtr Identity = OnlineSub->GetIdentityInterface();
+			if (Identity.IsValid())
+			{
+				TSharedPtr<const FUniqueNetId> UserId = Identity->GetUniquePlayerId(LocalPlayer->GetControllerId());
+
+				if (UserId.IsValid())
+				{
+					IOnlineAchievementsPtr Achievements = OnlineSub->GetAchievementsInterface();
+
+					if (Achievements.IsValid())
+					{
+						Achievements->QueryAchievements(*UserId.Get(), FOnQueryAchievementsCompleteDelegate::CreateUObject(this, &AReadyOrNotPlayerController::OnQueryAchievementsComplete));
+					}
+				}
+				else
+				{
+					UE_LOG(LogOnline, Warning, TEXT("No valid user id for this controller."));
+				}
+			}
+			else
+			{
+				UE_LOG(LogOnline, Warning, TEXT("No valid identity interface."));
+			}
+		}
+		else
+		{
+			UE_LOG(LogOnline, Warning, TEXT("No default online subsystem."));
+		}
+	}
+	else
+	{
+		UE_LOG(LogOnline, Warning, TEXT("No local player, cannot read achievements."));
+	}
+#endif	
+}
+
+void AReadyOrNotPlayerController::OnQueryAchievementsComplete(const FUniqueNetId& PlayerId, const bool bWasSuccessful)
+{
+	UE_LOG(LogOnline, Display, TEXT("AReadyOrNotPlayerController::OnQueryAchievementsComplete(bWasSuccessful = %s)"), bWasSuccessful ? TEXT("TRUE") : TEXT("FALSE"));
+}
+
+void AReadyOrNotPlayerController::ClientGameEnded_Implementation(class AActor* EndGameFocus, bool bIsWinner)
+{
+	
+}
+
+void AReadyOrNotPlayerController::StartSpeaking()
+{
+	AReadyOrNotPlayerState* ps = Cast<AReadyOrNotPlayerState>(PlayerState);
+	if (ps)
+	{
+		ps->SetIsTalking(true);
+		APlayerCharacter* PlayerCharacter = Cast<APlayerCharacter>(GetPawn());
+		if (!PlayerCharacter)
+		{
+			ps->Server_SetVoiceType(EVoiceType::VT_Team);
+			ps->Server_SetVoiceType_Implementation(EVoiceType::VT_Team);
+		}
+		
+		switch(ps->GetVoiceType())
+		{
+		case EVoiceType::VT_Local:
+			UReadyOrNotStatics::GetReadyOrNotGameInstance()->MultiChanPushToTalk(PTTKey::PTTAreaChannel, true);
+			break;
+		case EVoiceType::VT_Team:
+			UReadyOrNotStatics::GetReadyOrNotGameInstance()->MultiChanPushToTalk(PTTKey::PTTTeamChannel, true);
+			break;
+		default: ;
+		}
+	}
+	
+}
+
+void AReadyOrNotPlayerController::StopSpeaking()
+{
+	AReadyOrNotPlayerState* ps = Cast<AReadyOrNotPlayerState>(PlayerState);
+	if (ps)
+	{
+		ps->SetIsTalking(false);
+		UReadyOrNotStatics::GetReadyOrNotGameInstance()->MultiChanPushToTalk(PTTKey::PTTAreaChannel, false);
+		UReadyOrNotStatics::GetReadyOrNotGameInstance()->MultiChanPushToTalk(PTTKey::PTTTeamChannel, false);
+	}
+}
+
+void AReadyOrNotPlayerController::CycleVoiceChannel()
+{
+	AReadyOrNotPlayerState* ps = Cast<AReadyOrNotPlayerState>(PlayerState);
+	if (ps)
+	{
+		if (ps->GetVoiceType() == EVoiceType::VT_Local)
+		{
+			ps->Server_SetVoiceType(EVoiceType::VT_Team);
+			ps->Server_SetVoiceType_Implementation(EVoiceType::VT_Team);
+		}
+		else if (ps->GetVoiceType() == EVoiceType::VT_Team)
+		{
+			ps->Server_SetVoiceType(EVoiceType::VT_Local);
+			ps->Server_SetVoiceType_Implementation(EVoiceType::VT_Local);
+		}
+		
+		const UEnum* EnumPtrVoice = FindObject<UEnum>(ANY_PACKAGE, TEXT("EVoiceType"), true);
+		FString EnumVoiceStr = EnumPtrVoice? EnumPtrVoice->GetDisplayNameTextByIndex((uint8)ps->GetVoiceType()).ToString() : "Invalid";
+		//GEngine->AddOnScreenDebugMessage(-1, 10.0f, FColor::White, "Set Voice Channel to: " + EnumVoiceStr);
+	}
+}
+
+void AReadyOrNotPlayerController::ClientJoinVoice_Implementation(const FString& OnlineSessionId, const int32& TeamNum)
+{
+	if (!IsPrimaryPlayer())
+		return;
+
+	FString SelectedAudioDevice;
+	UBpGameplayHelperLib::LoadSelectedAudioDevice(SelectedAudioDevice);
+	UReadyOrNotGameInstance* Gi = UReadyOrNotStatics::GetReadyOrNotGameInstance();
+	Gi->SetInputAudioDevice(SelectedAudioDevice);
+	PendingVoiceSessionId = OnlineSessionId;
+	PendingVoiceTeamNum = TeamNum;
+	
+	if (!Gi->IsLoggedIn())
+	{
+		bPendingJoinVoice = true;
+	} else
+	{
+		Gi->JoinVoiceChannels(OnlineSessionId, TeamNum);
+	}
+}
+
+void AReadyOrNotPlayerController::SendChatMessage(FRChatMessage ChatMessage)
+{
+	if (ChatMessage.SenderName.IsEmpty())
+	{
+		if (PlayerState)
+		{
+			ChatMessage.SenderName = PlayerState->GetPlayerName();
+		}
+	}
+	
+	FString newName;
+	if (ChatMessage.Message.Split("/profilestart ", nullptr, &newName))
+	{
+		ConsoleCommand("stat startfile");
+		return;
+	} else if (ChatMessage.Message.Split("/profilestop ", nullptr, &newName))
+	{
+		ConsoleCommand("stat stopfile");
+		return;
+	} 
+
+	if (!ChatMessage.Message.IsEmpty() && !ChatMessage.SenderName.IsEmpty())
+		Server_SendChatMessage(ChatMessage);
+}
+
+AReadyOrNotPlayerState* AReadyOrNotPlayerController::GetRoNPlayerState()
+{
+	return Cast<AReadyOrNotPlayerState>(PlayerState);
+}
+
+void AReadyOrNotPlayerController::ClientWasKicked_Implementation(const FText& KickReason)
+{
+	AReadyOrNotPlayerController::ClientReturnToMainMenuWithTextReason(KickReason);	
+}
+
+void AReadyOrNotPlayerController::Server_SwapPlayersTeam_Implementation(APlayerState* ps)
+{
+	AReadyOrNotPlayerState* ourPS = Cast<AReadyOrNotPlayerState>(PlayerState);
+	AReadyOrNotPlayerState* theirPS = Cast<AReadyOrNotPlayerState>(ps);
+
+	if (ourPS && ourPS != theirPS && !ourPS->bSquadLeader)
+	{
+		return;
+	}
+	
+	if (theirPS)
+	{
+
+		if (theirPS->GetTeam() == ETeamType::TT_SERT_BLUE)
+		{
+			theirPS->Server_SetTeam_Implementation(ETeamType::TT_SERT_RED);
+		}
+		else if (theirPS->GetTeam() == ETeamType::TT_SERT_RED)
+		{
+			theirPS->Server_SetTeam_Implementation(ETeamType::TT_SERT_BLUE);
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::TakeDamageExec(const float DamageAmount)
+{
+	if (GetPawn())
+	{
+		GetPawn()->TakeDamage(DamageAmount, FDamageEvent{UDamageType::StaticClass()}, this, GetPawn());
+	}
+}
+
+void AReadyOrNotPlayerController::KillSWATTeam()
+{
+	TArray<AActor*> OutActors;
+	UGameplayStatics::GetAllActorsOfClass(GetWorld(), ASWATCharacter::StaticClass(), OutActors);
+
+	for (AActor* actor : OutActors)
+	{
+		ASWATCharacter* swat = Cast<ASWATCharacter>(actor);
+		if (swat)
+		{
+			FDamageEvent ConsoleDamageEvent = FDamageEvent();
+			ConsoleDamageEvent.DamageTypeClass = UDamageType::StaticClass();
+			swat->TakeDamage(999.0f, ConsoleDamageEvent, this, swat);
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::InternalSaveStats()
+{
+	const FStatUnitData* StatUnitData = GetWorld()->GetGameViewport()->GetStatUnitData();
+	FString				 LevelName = UGameplayStatics::GetCurrentLevelName(GetWorld(), true);
+
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%f"), *LevelName, TEXT("RenderThreadTime"), StatUnitData->RenderThreadTime);
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%f"), *LevelName, TEXT("GameThreadTime"), StatUnitData->GameThreadTime);
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%f"), *LevelName, TEXT("GPUFrameTime"), StatUnitData->GPUFrameTime[0]);
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%f"), *LevelName, TEXT("FrameTime"), StatUnitData->FrameTime);
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%f"), *LevelName, TEXT("RHITTime"), StatUnitData->RHITTime);
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%f"), *LevelName, TEXT("InputLatencyTime"), StatUnitData->InputLatencyTime);
+
+	const FPlatformMemoryStats Stats = FPlatformMemory::GetStats();
+
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%lld"), *LevelName, TEXT("TotalPhysical"), Stats.TotalPhysical);
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%lld"), *LevelName, TEXT("TotalVirtual"), Stats.TotalVirtual);
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%lld"), *LevelName, TEXT("UsedPhysical"), Stats.UsedPhysical);
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%lld"), *LevelName, TEXT("UsedVirtual"), Stats.UsedVirtual);
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%lld"), *LevelName, TEXT("PeakUsedPhysical"), Stats.PeakUsedPhysical);
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%lld"), *LevelName, TEXT("PeakUsedVirtual"), Stats.PeakUsedVirtual);
+
+	FTextureMemoryStats TexMemStats;
+	RHIGetTextureMemoryStats(TexMemStats);
+
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%lld"), *LevelName, TEXT("DedicatedVideoMemory"), TexMemStats.DedicatedVideoMemory);
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%lld"), *LevelName, TEXT("DedicatedSystemMemory"), TexMemStats.DedicatedSystemMemory);
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%lld"), *LevelName, TEXT("SharedSystemMemory"), TexMemStats.SharedSystemMemory);
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%lld"), *LevelName, TEXT("TotalGraphicsMemory"), TexMemStats.TotalGraphicsMemory);
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%lld"), *LevelName, TEXT("AllocatedMemorySize"), TexMemStats.AllocatedMemorySize);
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%lld"), *LevelName, TEXT("LargestContiguousAllocation"), TexMemStats.LargestContiguousAllocation);
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%lld"), *LevelName, TEXT("TexturePoolSize"), TexMemStats.TexturePoolSize);
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%lld"), *LevelName, TEXT("PendingMemoryAdjustment"), TexMemStats.PendingMemoryAdjustment);
+
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%ld"), *LevelName, TEXT("NumDrawCalls"), GNumDrawCallsRHI[0]);
+	UE_LOG(LogReadyOrNot, Log, TEXT("TestResult;%s;%s;%ld"), *LevelName, TEXT("NumPrimitives"), GNumPrimitivesDrawnRHI[0]);
+}
+
+void AReadyOrNotPlayerController::SavePerformanceStats()
+{
+	GEngine->Exec(GetWorld(), *FString::Printf(TEXT("stat none")));
+	GEngine->Exec(GetWorld(), *FString::Printf(TEXT("stat unit")));
+
+	FTimerHandle StatsTimer;
+	GetWorldTimerManager().SetTimer(StatsTimer, this, &AReadyOrNotPlayerController::InternalSaveStats, 2.0f, false);
+}
+
+void AReadyOrNotPlayerController::ExecuteLineTracePerfTest()
+{
+	int count = 0;
+	FDateTime StartTime = FDateTime::UtcNow();
+	if (AReadyOrNotGameState* GameState = Cast<AReadyOrNotGameState>(GetWorld()->GetGameState()))
+	{
+		for (AReadyOrNotCharacter* Other : GameState->AllReadyOrNotCharacters)
+		{
+			if (!Other || Other == GetPawn())
+				continue;
+			FCollisionQueryParams CollisionParams;
+			//CollisionParams.AddIgnoredActor(Other);
+			CollisionParams.TraceTag = SCENE_QUERY_STAT(LineOfSight);
+			CollisionParams.bTraceComplex = true;
+
+			//if (const AReadyOrNotCharacter* OtherCharacter = Cast<AReadyOrNotCharacter>(Other))
+			//{
+			//	CollisionParams.AddIgnoredActors(OtherCharacter->GetCollisionIgnoredActors());
+			//	CollisionParams.AddIgnoredComponents(OtherCharacter->GetCollisionIgnoredComponents());
+			//}
+
+			FVector ViewPoint;
+			FRotator ViewRotation;
+			GetActorEyesViewPoint(ViewPoint, ViewRotation);
+
+			if (ViewPoint == FVector::ZeroVector)
+			{
+				continue;
+			}
+
+			FVector TargetLocation = Other->GetTargetLocation(GetPawn());
+			FVector RightVector = Other->GetActorRightVector();
+
+			if (TargetLocation == FVector::ZeroVector || ViewPoint == FVector::ZeroVector)
+				continue;
+
+			for (int i = 0; i < 10000; i++)
+			{
+				FHitResult HeadHit;
+				GetWorld()->LineTraceSingleByChannel(HeadHit, ViewPoint, TargetLocation, ECC_Visibility, CollisionParams);
+				count++;
+			}
+		}
+	}
+	float TimeElapsedInMs = (FDateTime::UtcNow() - StartTime).GetTotalMilliseconds();
+	UE_LOG(LogTemp, Warning, TEXT("Line Traces Result: %d Line Traces in %f ms. Average %f"), count, TimeElapsedInMs, TimeElapsedInMs / count);
+}
+
+void AReadyOrNotPlayerController::ExecuteSweepTraceSinglePerfTest()
+{
+	int		  count = 0;
+	FDateTime StartTime = FDateTime::UtcNow();
+	if (AReadyOrNotGameState* GameState = Cast<AReadyOrNotGameState>(GetWorld()->GetGameState()))
+	{
+		for (AReadyOrNotCharacter* Other : GameState->AllReadyOrNotCharacters)
+		{
+			FCollisionQueryParams CapsuleParams(SCENE_QUERY_STAT(CrouchTrace), false, Other);
+			float PawnRadius, PawnHalfHeight;
+			Other->GetCapsuleComponent()->GetScaledCapsuleSize(PawnRadius, PawnHalfHeight);
+			const float	  ShrinkHalfHeight = PawnHalfHeight - PawnRadius;
+			const float	  TraceDist = PawnHalfHeight - ShrinkHalfHeight;
+			const FVector Down = FVector(0.f, 0.f, -TraceDist);
+
+			FHitResult		Hit(1.f);
+			FCollisionShape ShortCapsuleShape = FCollisionShape::MakeSphere(500);
+			for (int i = 0; i < 1000; i++)
+			{
+				bool bBlockingHit = GetWorld()->SweepSingleByChannel(Hit, Other->GetActorLocation(), Other->GetActorLocation() + Down, FQuat::Identity, ECC_Visibility, ShortCapsuleShape, CapsuleParams);
+				count++;
+			}
+		}
+	}
+	float TimeElapsedInMs = (FDateTime::UtcNow() - StartTime).GetTotalMilliseconds();
+	UE_LOG(LogTemp, Warning, TEXT("Sweep Traces Single Result: %d Line Traces in %f ms. Average %f"), count, TimeElapsedInMs, TimeElapsedInMs/count);
+}
+
+void AReadyOrNotPlayerController::ExecuteSweepTraceMultiPerfTest()
+{
+	int		  count = 0;
+	FDateTime StartTime = FDateTime::UtcNow();
+	if (AReadyOrNotGameState* GameState = Cast<AReadyOrNotGameState>(GetWorld()->GetGameState()))
+	{
+		for (AReadyOrNotCharacter* Other : GameState->AllReadyOrNotCharacters)
+		{
+			FCollisionQueryParams CapsuleParams(SCENE_QUERY_STAT(CrouchTrace), false, Other);
+			float				  PawnRadius, PawnHalfHeight;
+			Other->GetCapsuleComponent()->GetScaledCapsuleSize(PawnRadius, PawnHalfHeight);
+			const float	  ShrinkHalfHeight = PawnHalfHeight - PawnRadius;
+			const float	  TraceDist = PawnHalfHeight - ShrinkHalfHeight;
+			const FVector Down = FVector(0.f, 0.f, -TraceDist);
+
+			TArray<FHitResult> Hits;
+			FCollisionShape	   ShortCapsuleShape = FCollisionShape::MakeSphere(500);
+			for (int i = 0; i < 10; i++)
+			{
+				bool bBlockingHit = GetWorld()->SweepMultiByChannel(Hits, Other->GetActorLocation(), Other->GetActorLocation() + Down, FQuat::Identity, ECC_Visibility, ShortCapsuleShape, CapsuleParams);
+				count++;
+			}
+		}
+	}
+	float TimeElapsedInMs = (FDateTime::UtcNow() - StartTime).GetTotalMilliseconds();
+	UE_LOG(LogTemp, Warning, TEXT("Sweep Traces Multi Result: %d Line Traces in %f ms. Average %f"), count, TimeElapsedInMs, TimeElapsedInMs / count);
+}
+
+void AReadyOrNotPlayerController::DestroyAllAI()
+{
+	for (TActorIterator<ACyberneticCharacter> It(GetWorld()); It; ++It)
+	{
+		ACyberneticCharacter* ai = *It;
+		if (ai->GetController())
+			ai->GetController()->Destroy();
+		ai->Destroy();
+	}
+}
+
+void AReadyOrNotPlayerController::DestroyAllSuspects()
+{
+	for (TActorIterator<ACyberneticCharacter> It(GetWorld()); It; ++It)
+	{
+		ACyberneticCharacter* ai = *It;
+		if (ai->GetTeam() == ETeamType::TT_SUSPECT)
+		{
+			if (ai->GetController() )
+				ai->GetController()->Destroy();
+			ai->Destroy();
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::DestroySwatTeam()
+{
+	for (TActorIterator<ASWATCharacter> It(GetWorld()); It; ++It)
+	{
+		ASWATCharacter* SWAT = *It;
+		if (SWAT->GetController())
+			SWAT->GetController()->Destroy();
+		SWAT->Destroy();
+	}
+}
+
+void AReadyOrNotPlayerController::DestroySwatInventoryItems()
+{
+	for (TActorIterator<ASWATCharacter> It(GetWorld()); It; ++It)
+	{
+		ASWATCharacter* SWAT = *It;
+		for (int32 i = 0; i < SWAT->GetInventoryComponent()->GetInventoryItems().Num(); i++)
+		{
+			if (SWAT->GetInventoryComponent()->GetInventoryItems()[i])
+				SWAT->GetInventoryComponent()->GetInventoryItems()[i]->Destroy();
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::DestroySwatControllers()
+{
+	for (TActorIterator<ASWATCharacter> It(GetWorld()); It; ++It)
+	{
+		ASWATCharacter* SWAT = *It;
+		if (SWAT->GetController())
+			SWAT->GetController()->Destroy();
+	}
+}
+
+void AReadyOrNotPlayerController::DestroySwatAnimation()
+{
+	for (TActorIterator<ASWATCharacter> It(GetWorld()); It; ++It)
+	{
+		ASWATCharacter* SWAT = *It;
+		SWAT->GetMesh()->SetAnimInstanceClass(nullptr);
+	}
+}
+
+void AReadyOrNotPlayerController::DisableAllItemTicks()
+{
+	for (TActorIterator<ABaseItem> It(GetWorld()); It; ++It)
+	{
+		ABaseItem* bi = *It;
+		bi->SetActorTickEnabled(false);
+	}
+}
+
+void AReadyOrNotPlayerController::ServerStatFileStart()
+{
+	Server_StatFile(true);
+}
+
+void AReadyOrNotPlayerController::ServerStatFileStop()
+{
+	Server_StatFile(false);
+}
+
+void AReadyOrNotPlayerController::Server_StatFile_Implementation(bool bStartStatFile)
+{
+	ConsoleCommand(bStartStatFile ? "stat startfile" : "stat stopfile");
+}
+
+void AReadyOrNotPlayerController::SetLastKilledCharacter(ACharacter* KilledCharacter)
+{
+	DestroyLastKilledCharacter();
+	LastKilledCharacter = KilledCharacter;
+}
+
+void AReadyOrNotPlayerController::DestroyLastKilledCharacter()
+{
+	if (LastKilledCharacter)
+	{
+		LastKilledCharacter->Destroy();
+		LastKilledCharacter = nullptr;
+	}
+}
+
+void AReadyOrNotPlayerController::Server_SendChatMessage_Implementation(FRChatMessage ChatMessage)
+{
+
+	BP_HandleMessage(ChatMessage);
+	AReadyOrNotGameState* gs = Cast<AReadyOrNotGameState>(GetWorld()->GetGameState());
+	if (gs)
+	{
+		
+		if (ChatMessage.Message.Equals("/kill", ESearchCase::IgnoreCase))
+		{
+			APlayerCharacter* pc = Cast<APlayerCharacter>(GetPawn());
+			if (pc)
+			{
+				SendChatMessage(FRChatMessage("SYSTEM", "You have been killed", FLinearColor::Red, this));
+				UGameplayStatics::ApplyDamage(pc, 100000.0f, pc->GetController(), pc, UDamageType::StaticClass());
+			}
+		}
+		else if (ChatMessage.Message.StartsWith("/name "))
+		{
+			FString newName;
+			if (IsLocalController())
+			{
+				if (ChatMessage.Message.Split("/name ", nullptr, &newName))
+				{
+					SendChatMessage(FRChatMessage("SYSTEM", "Set player name to " + newName, FLinearColor::Green, this));
+					if (PlayerState)
+						PlayerState->SetPlayerName(newName);
+				}	else
+				{
+					SendChatMessage(FRChatMessage("SYSTEM", "Unable to set player name", FLinearColor::Red, this));
+				}
+			}
+
+		} else if (ChatMessage.Message.Equals(XorString("/886pvp6a54bc8d55")))
+		{
+			if (IsLocalController())
+			{
+				ACoopGM* CoopGm = GetWorld()->GetAuthGameMode<ACoopGM>();
+				if (CoopGm)
+				{
+					CoopGm->EnableHiddenTigerCrouchingDragon();
+					SendChatMessage(FRChatMessage("SYSTEM", XorString("Crouching Tiger Hidden Dragon enabled"), FLinearColor::Green, nullptr));
+				}
+			}			
+		} else if (ChatMessage.Message.Equals(XorString("/suspect")))
+		{
+			ADefusalGM* Defusal = Cast<ADefusalGM>(UReadyOrNotStatics::GetReadyOrNotGameMode());
+			if (Defusal)
+			{
+				Server_SetTeamType(ETeamType::TT_SERT_RED);
+			}
+		}  else if (ChatMessage.Message.Equals(XorString("/swat")))
+		{
+			ADefusalGM* Defusal = Cast<ADefusalGM>(UReadyOrNotStatics::GetReadyOrNotGameMode());
+			if (Defusal)
+			{
+				Server_SetTeamType(ETeamType::TT_SERT_BLUE);
+			}
+		}else if (ChatMessage.Message.Equals(XorString("/886pvp6a54bc8d55")))
+		{
+			if (IsLocalController())
+			{
+				ACoopGM* CoopGm = GetWorld()->GetAuthGameMode<ACoopGM>();
+				if (CoopGm)
+				{
+					CoopGm->EnableHiddenTigerCrouchingDragon();
+					SendChatMessage(FRChatMessage("SYSTEM", XorString("Crouching Tiger Hidden Dragon enabled"), FLinearColor::Green, nullptr));
+				}
+			}			
+		}
+		else if (ChatMessage.Message.StartsWith("/"))
+		{
+			SendChatMessage(FRChatMessage("SYSTEM", "Unknown command", FLinearColor::Red, this));
+		}
+		else
+		{
+			// If the person who sent this chat message is a team leader, set the chat message team to SQUAD (0000236)
+			if (PlayerState && PlayerState->IsA(AReadyOrNotPlayerState::StaticClass()) && Cast<AReadyOrNotPlayerState>(PlayerState)->bSquadLeader)
+			{
+				ChatMessage.AssociatedTeam = ETeamType::TT_SQUAD;
+				ChatMessage.TargetTeam = ETeamType::TT_SQUAD;
+			}
+
+			gs->Multicast_BroadcastChatMessage(ChatMessage);
+		}
+	}
+
+}
+
+void AReadyOrNotPlayerController::UpdateRotation(float DeltaTime)
+{
+	// Calculate Delta to be applied on ViewRotation
+	FRotator DeltaRot(RotationInput);
+
+	FRotator ViewRotation = GetControlRotation();
+
+	if (PlayerCameraManager)
+	{
+		PlayerCameraManager->ProcessViewRotation(DeltaTime, ViewRotation, DeltaRot);
+	}
+
+	APlayerCharacter* pc = Cast<APlayerCharacter>(GetPawn());
+	if (pc)
+	{
+		if (!pc->bFreelooking)
+		{
+			SetControlRotation(ViewRotation);
+			pc->FaceRotation(ViewRotation, DeltaTime);
+		}
+	}
+	else
+	{
+		SetControlRotation(ViewRotation);
+		
+		APawn* const P = GetPawnOrSpectator();
+		if (P)
+		{
+			P->FaceRotation(ViewRotation, DeltaTime);
+		}
+	}
+}
+
+FRotator AReadyOrNotPlayerController::GetDesiredRotation() const
+{
+	return Super::GetDesiredRotation();
+}
+
+
+bool AReadyOrNotPlayerController::CanSetSpawn(ETeamType SpawnTeam, ESelectedSpawn NewSpawnPoint, bool bSameSpawn)
+{
+	ACoopGS* gs = Cast<ACoopGS>(GetWorld()->GetGameState());
+	if (gs == nullptr)
+	{
+		return false;
+	}
+
+	AReadyOrNotPlayerState* ps = Cast<AReadyOrNotPlayerState>(PlayerState);
+	if (ps == nullptr || !ps->bSquadLeader)
+	{
+		return false;
+	}
+
+	// Check to see if setting spawn point to current
+	switch (SpawnTeam)
+	{
+		case ETeamType::TT_SQUAD:
+			if (NewSpawnPoint == gs->SelectedBlueSpawnPoint && NewSpawnPoint == gs->SelectedRedSpawnPoint)
+			{
+				return bSameSpawn;
+			}
+			break;
+		case ETeamType::TT_SERT_BLUE:
+			if (NewSpawnPoint == gs->SelectedBlueSpawnPoint)
+			{
+				return bSameSpawn;
+			}
+			break;
+		case ETeamType::TT_SERT_RED:
+			if (NewSpawnPoint == gs->SelectedRedSpawnPoint)
+			{
+				return bSameSpawn;
+			}
+			break;
+		default: ;
+	}
+
+	int32 AvailableSquadPoints = gs->SquadPointsRemaining;
+	int32 SquadPointCost;
+	FLevelDataLookupTable LevelData = UBpGameplayHelperLib::GetLevelData(GetWorld());
+
+	// Add the cost of the selected spawn points into the calculation
+	if (SpawnTeam == ETeamType::TT_SQUAD || SpawnTeam == ETeamType::TT_SERT_BLUE)
+	{
+		AvailableSquadPoints += gs->BlueSpawnSquadPoints;
+	}
+	if (SpawnTeam == ETeamType::TT_SQUAD || SpawnTeam == ETeamType::TT_SERT_RED)
+	{
+		AvailableSquadPoints += gs->RedSpawnSquadPoints;
+	}
+
+	switch (NewSpawnPoint)
+	{
+	case ESelectedSpawn::SS_FirstSpawn:
+		if (LevelData.Spawn_1.bSpawnDisabled)
+		{
+			return false;
+		}
+		SquadPointCost = LevelData.Spawn_1.PtsCost;
+		break;
+
+	case ESelectedSpawn::SS_SecondSpawn:
+		if (LevelData.Spawn_2.bSpawnDisabled)
+		{
+			return false;
+		}
+		SquadPointCost = LevelData.Spawn_2.PtsCost;
+		break;
+
+	case ESelectedSpawn::SS_ThirdSpawn:
+		if (LevelData.Spawn_3.bSpawnDisabled)
+		{
+			return false;
+		}
+		SquadPointCost = LevelData.Spawn_3.PtsCost;
+		break;
+
+	case ESelectedSpawn::SS_FourthSpawn:
+		if (LevelData.Spawn_4.bSpawnDisabled)
+		{
+			return false;
+		}
+		SquadPointCost = LevelData.Spawn_4.PtsCost;
+		break;
+
+	default:
+		SquadPointCost = 0;
+		break;
+	}
+
+	// Multiply the squad point cost by two if we are targetting gold team.
+	if (SpawnTeam == ETeamType::TT_SQUAD)
+	{
+		SquadPointCost *= 2;
+	}
+
+	if (SquadPointCost > AvailableSquadPoints)
+	{
+		return false;
+	}
+
+	return true;
+}
+
+bool AReadyOrNotPlayerController::CanEnableDeployable(int32 DeployableNum)
+{
+	ACoopGS* gs = Cast<ACoopGS>(GetWorld()->GetGameState());
+	if (gs == nullptr)
+	{
+		return false;
+	}
+
+	AReadyOrNotPlayerState* ps = Cast<AReadyOrNotPlayerState>(PlayerState);
+	if (ps == nullptr || !ps->bSquadLeader)
+	{
+		return false;
+	}
+
+	int32 DeployableCost;
+	FLevelDataLookupTable LevelData = UBpGameplayHelperLib::GetLevelData(GetWorld());
+
+	if (DeployableNum < 0 || DeployableNum >= LevelData.Deployables.Num())
+	{
+		// Can't turn it on, because either the level data is not valid, or it's not a valid deployable number.
+		return false;
+	}
+
+	DeployableCost = LevelData.Deployables[DeployableNum].PtsCost;
+
+	if (gs->IsDeployableEnabled(DeployableNum))
+	{
+		return false;
+	}
+	else
+	{
+		// We do not have the deployable equipped. Try to toggle it on.
+		if (gs->SquadPointsRemaining < DeployableCost)
+		{
+			// We don't have enough points remaining to enable it.
+			return false;
+		}
+		return true;
+	}
+}
+
+bool AReadyOrNotPlayerController::CanDisableDeployable(int32 DeployableNum)
+{
+	ACoopGS* gs = Cast<ACoopGS>(GetWorld()->GetGameState());
+	if (gs == nullptr)
+	{
+		return false;
+	}
+
+	AReadyOrNotPlayerState* ps = Cast<AReadyOrNotPlayerState>(PlayerState);
+	if (ps == nullptr || !ps->bSquadLeader)
+	{
+		return false;
+	}
+
+	FLevelDataLookupTable LevelData = UBpGameplayHelperLib::GetLevelData(GetWorld());
+
+	if (DeployableNum < 0 || DeployableNum >= LevelData.Deployables.Num())
+	{
+		// Can't turn it on, because either the level data is not valid, or it's not a valid deployable number.
+		return false;
+	}
+
+	if (!gs->IsDeployableEnabled(DeployableNum))
+	{
+		return false;
+	}
+	return true;
+}
+
+bool AReadyOrNotPlayerController::CanEnablePersonnel(int32 PersonnelNum, int32 MapPointNum)
+{
+	ACoopGS* gs = Cast<ACoopGS>(GetWorld()->GetGameState());
+	if (gs == nullptr)
+	{
+		return false;
+	}
+
+	AReadyOrNotPlayerState* ps = Cast<AReadyOrNotPlayerState>(PlayerState);
+	if (ps == nullptr || !ps->bSquadLeader)
+	{
+		return false;
+	}
+
+	FLevelDataLookupTable LevelData = UBpGameplayHelperLib::GetLevelData(GetWorld());
+
+	if (PersonnelNum < 0 || PersonnelNum >= LevelData.AllPersonnel.Num())
+	{
+		// Can't turn it on, because either the level data is not valid, or it's not a valid deployable number.
+		return false;
+	}
+
+	if (gs->IsPersonnelEnabled(PersonnelNum))
+	{	// Can't enable it if it's already enabled (rollsafe.jpg)
+		return false;
+	}
+
+	if (gs->SquadPointsRemaining < LevelData.AllPersonnel[PersonnelNum].PtsCost)
+	{	// Not enough points to enable it
+		return false;
+	}
+
+	switch (LevelData.AllPersonnel[PersonnelNum].PersonnelType)
+	{
+		case EPersonnel::PERS_None:
+		case EPersonnel::PERS_PowerCrew:
+		case EPersonnel::PERS_Negotiator:
+			return true;
+
+		default:
+			if (!LevelData.AllPersonnel[PersonnelNum].AvailableMapPoints.Contains(MapPointNum))
+			{	// Can't enable it at this specific point if the point is not valid for this personnel
+				return false;
+			}
+			if (gs->CurrentUsedPersonnelPoints & (1 << MapPointNum))
+			{	// Can't enable it at this specific point if the point is currently in use
+				return false;
+			}
+			return true;
+	}
+}
+
+bool AReadyOrNotPlayerController::CanDisablePersonnel(int32 PersonnelNum)
+{
+	ACoopGS* gs = Cast<ACoopGS>(GetWorld()->GetGameState());
+	if (gs == nullptr)
+	{
+		return false;
+	}
+
+	AReadyOrNotPlayerState* ps = Cast<AReadyOrNotPlayerState>(PlayerState);
+	if (ps == nullptr || !ps->bSquadLeader)
+	{
+		return false;
+	}
+
+	FLevelDataLookupTable LevelData = UBpGameplayHelperLib::GetLevelData(GetWorld());
+
+	if (PersonnelNum < 0 || PersonnelNum >= LevelData.AllPersonnel.Num())
+	{
+		// Can't turn it on, because either the level data is not valid, or it's not a valid deployable number.
+		return false;
+	}
+
+	if (!gs->IsPersonnelEnabled(PersonnelNum))
+	{
+		return false;
+	}
+
+	return true;
+}
+
+void AReadyOrNotPlayerController::Server_SetSpawn_Implementation(ETeamType SpawnTeam, ESelectedSpawn NewSpawnPoint)
+{
+
+	if (!CanSetSpawn(SpawnTeam, NewSpawnPoint))
+		return;
+
+	ACoopGS* gs = Cast<ACoopGS>(GetWorld()->GetGameState());
+	FLevelDataLookupTable LevelData = UBpGameplayHelperLib::GetLevelData(GetWorld());
+	int32 DesiredPointCost = 0;
+
+	
+	switch (NewSpawnPoint)
+	{
+		case ESelectedSpawn::SS_FirstSpawn:
+			DesiredPointCost = LevelData.Spawn_1.PtsCost;
+			break;
+		case ESelectedSpawn::SS_SecondSpawn:
+			DesiredPointCost = LevelData.Spawn_2.PtsCost;
+			break;
+		case ESelectedSpawn::SS_ThirdSpawn:
+			DesiredPointCost = LevelData.Spawn_3.PtsCost;
+			break;
+		case ESelectedSpawn::SS_FourthSpawn:
+			DesiredPointCost = LevelData.Spawn_4.PtsCost;
+			break;
+		default: ;
+	}
+
+	if (SpawnTeam == ETeamType::TT_SQUAD || SpawnTeam == ETeamType::TT_SERT_BLUE)
+	{
+		gs->SquadPointsRemaining += gs->BlueSpawnSquadPoints;
+		gs->BlueSpawnSquadPoints = DesiredPointCost;
+		gs->SelectedBlueSpawnPoint = NewSpawnPoint;
+	}
+	if (SpawnTeam == ETeamType::TT_SQUAD || SpawnTeam == ETeamType::TT_SERT_RED)
+	{
+		gs->SquadPointsRemaining += gs->RedSpawnSquadPoints;
+		gs->RedSpawnSquadPoints = DesiredPointCost;
+		gs->SelectedRedSpawnPoint = NewSpawnPoint;
+	}
+	if (SpawnTeam == ETeamType::TT_SQUAD)
+	{
+		DesiredPointCost *= 2;
+	}
+
+	gs->SquadPointsRemaining -= DesiredPointCost;
+}
+
+void AReadyOrNotPlayerController::Server_EnableDeployable_Implementation(int32 DeployableNum)
+{
+	if (!CanEnableDeployable(DeployableNum))
+		return;
+
+	ACoopGS* gs = Cast<ACoopGS>(GetWorld()->GetGameState());
+	FLevelDataLookupTable LevelData = UBpGameplayHelperLib::GetLevelData(GetWorld());
+
+	gs->SquadPointsRemaining -= LevelData.Deployables[DeployableNum].PtsCost;
+	gs->CurrentDeployables |= (1 << DeployableNum);
+}
+
+void AReadyOrNotPlayerController::Server_DisableDeployable_Implementation(int32 DeployableNum)
+{
+	if (!CanDisableDeployable(DeployableNum))
+		return;
+
+	ACoopGS* gs = Cast<ACoopGS>(GetWorld()->GetGameState());
+	FLevelDataLookupTable LevelData = UBpGameplayHelperLib::GetLevelData(GetWorld());
+
+	gs->SquadPointsRemaining += LevelData.Deployables[DeployableNum].PtsCost;
+	gs->CurrentDeployables &= ~(1 << DeployableNum);
+}
+
+void AReadyOrNotPlayerController::Server_EnablePersonnel_Implementation(int32 PersonnelNum, int32 MapPointNum)
+{
+	if (!CanEnablePersonnel(PersonnelNum, MapPointNum))
+		return;
+
+	ACoopGS* gs = Cast<ACoopGS>(GetWorld()->GetGameState());
+	FLevelDataLookupTable LevelData = UBpGameplayHelperLib::GetLevelData(GetWorld());
+
+	gs->CurrentUsedPersonnelPoints |= (1 << MapPointNum);
+	gs->SquadPointsRemaining -= LevelData.AllPersonnel[PersonnelNum].PtsCost;
+	gs->CurrentPersonnel |= (1 << PersonnelNum);
+	Multicast_SetPersonnelAtPoint(PersonnelNum, MapPointNum);
+}
+
+void AReadyOrNotPlayerController::Server_DisablePersonnel_Implementation(int32 PersonnelNum)
+{
+	if (!CanDisablePersonnel(PersonnelNum))
+		return;
+
+	ACoopGS* gs = Cast<ACoopGS>(GetWorld()->GetGameState());
+	FLevelDataLookupTable LevelData = UBpGameplayHelperLib::GetLevelData(GetWorld());
+
+	gs->CurrentUsedPersonnelPoints &= ~(1 << gs->PersonnelMapping[PersonnelNum]);
+	gs->SquadPointsRemaining += LevelData.AllPersonnel[PersonnelNum].PtsCost;
+	gs->CurrentPersonnel &= ~(1 << PersonnelNum);
+	Multicast_RemovePersonnelAtPoint(PersonnelNum);
+}
+
+void AReadyOrNotPlayerController::Multicast_SetPersonnelAtPoint_Implementation(int32 PersonnelNum, int32 MapPointNum)
+{
+	ACoopGS* gs = Cast<ACoopGS>(GetWorld()->GetGameState());
+	gs->PersonnelMapping.Remove(PersonnelNum);
+	gs->PersonnelMapping.Add(PersonnelNum, MapPointNum);
+
+	TArray<UUserWidget*> OutWidgets;
+	UWidgetBlueprintLibrary::GetAllWidgetsOfClass(GetWorld(), OutWidgets, UPlanningMapWidget::StaticClass(), false);
+	for (UUserWidget* widget : OutWidgets)
+	{
+		UPlanningMapWidget* PlanWidget = Cast<UPlanningMapWidget>(widget);
+		PlanWidget->OnPersonnelAdded(PersonnelNum, MapPointNum);
+	}
+}
+
+void AReadyOrNotPlayerController::Multicast_RemovePersonnelAtPoint_Implementation(int32 PersonnelNum)
+{
+	ACoopGS* gs = Cast<ACoopGS>(GetWorld()->GetGameState());
+	gs->PersonnelMapping.Remove(PersonnelNum);
+
+	TArray<UUserWidget*> OutWidgets;
+	UWidgetBlueprintLibrary::GetAllWidgetsOfClass(GetWorld(), OutWidgets, UPlanningMapWidget::StaticClass(), false);
+	for (UUserWidget* widget : OutWidgets)
+	{
+		UPlanningMapWidget* PlanWidget = Cast<UPlanningMapWidget>(widget);
+		PlanWidget->OnPersonnelRemoved(PersonnelNum);
+	}
+}
+
+void AReadyOrNotPlayerController::Multicast_ForcePlanningRefresh_Implementation()
+{
+	TArray<UUserWidget*> OutWidgets;
+	UWidgetBlueprintLibrary::GetAllWidgetsOfClass(GetWorld(), OutWidgets, UPlanningMapWidget::StaticClass(), false);
+	for (UUserWidget* widget : OutWidgets)
+	{
+		UPlanningMapWidget* PlanWidget = Cast<UPlanningMapWidget>(widget);
+		PlanWidget->OnForceMapRefresh();
+	}
+}
+
+void AReadyOrNotPlayerController::PrintAllSceneComponentWhoseOriginIsZero()
+{
+	for (TObjectIterator<USceneComponent> It; It; ++It)
+	{
+		if (It->IsTemplate())
+			continue;
+
+		if (It->GetWorld() != GetWorld())
+			continue;
+
+		if (!It->GetOwner())
+			continue;
+		
+		if (It->GetComponentLocation() == FVector::ZeroVector)
+		{
+			ULog::Info(GetNameSafe((*It)->GetOwner()) + " | " + It->GetName());
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::Server_RequestLoadoutChange_Implementation(FSavedLoadout Loadout)
+{
+	APlayerCharacter* pc = Cast<APlayerCharacter>(GetPawn());
+	if (pc)
+	{
+		pc->GetInventoryComponent()->Server_AttemptEquipNewLoadout(Loadout);
+	}
+}
+
+bool AReadyOrNotPlayerController::Server_RequestLoadoutChange_Validate(FSavedLoadout Loadout)
+{
+	return true;
+}
+
+void AReadyOrNotPlayerController::SpawnAI(FString TableName /*= ""*/, int32 Count)
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	UDataTable* dt = UBpGameplayHelperLib::GetAILookupDataTable();
+	if (!dt)
+		return;
+
+	if (!GetPawn())
+		return;
+
+	const FVector SpawnLoc = GetPawn()->GetActorLocation() + (GetPawn()->GetActorForwardVector() * 200.0f);
+
+	FAIDataLookupTable* AIData = dt->FindRow<FAIDataLookupTable>(*TableName, "Spawn AI Console Command");
+	if (AIData)
+	{
+		for (int32 i = 0; i < Count; i++)
+		{
+			ACyberneticCharacter* SpawnedCharacter = GetWorld()->SpawnActor<ACyberneticCharacter>(AIData->CharacterClass, SpawnLoc, GetPawn()->GetActorRotation());
+			if (SpawnedCharacter)
+			{
+				SpawnedCharacter->FinishAISpawning(nullptr, AIData);
+			}
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::StartMatchmaking()
+{
+#if defined(TARGET_PS5)
+	UConsoleMultiplayerStatics::StartMatchMaking(GetWorld(),false);
+#endif
+}
+
+void AReadyOrNotPlayerController::SpawnRandomAI(int32 Count /*= 1*/)
+{
+	UDataTable* dt = UBpGameplayHelperLib::GetAILookupDataTable();
+	if (!dt)
+		return;
+
+	if (!GetPawn())
+		return;
+
+	const FVector SpawnLoc = GetPawn()->GetActorLocation() + (GetPawn()->GetActorForwardVector() * 200.0f);
+
+	for (int32 i = 0; i < Count; i++)
+	{
+		FAIDataLookupTable* AIData = dt->FindRow<FAIDataLookupTable>(dt->GetRowNames()[FMath::RandRange(0, dt->GetRowNames().Num() - 1)], "Spawn AI Console Command");
+		if (AIData)
+		{
+			ACyberneticCharacter* SpawnedCharacter = GetWorld()->SpawnActor<ACyberneticCharacter>(AIData->CharacterClass, SpawnLoc, GetPawn()->GetActorRotation());
+			if (SpawnedCharacter)
+			{
+				SpawnedCharacter->FinishAISpawning(nullptr, AIData);
+			}
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::SpawnAIAtLocation(FString TableName, FVector Location, FVector MoveLocation)
+{
+	UDataTable* dt = UBpGameplayHelperLib::GetAILookupDataTable();
+	if (!dt)
+		return;
+
+	FAIDataLookupTable* AIData = dt->FindRow<FAIDataLookupTable>(*TableName, "Spawn AI Console Command");
+	if (AIData)
+	{
+		ACyberneticCharacter* SpawnedCharacter = GetWorld()->SpawnActor<ACyberneticCharacter>(AIData->CharacterClass, Location, GetPawn()->GetActorRotation());
+		if (SpawnedCharacter)
+		{
+			SpawnedCharacter->FinishAISpawning(nullptr, AIData);
+			UMoveActivity* MoveActivityInst = NewObject<UMoveActivity>(Cast<ACyberneticController>(SpawnedCharacter->GetController()), UMoveActivity::StaticClass());
+			//MoveActivityInst->bAbortIfTrackingEnemy = true;
+
+			if (const UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld()))
+			{
+				FNavLocation RandomPoint;
+				NavSys->GetRandomReachablePointInRadius(MoveLocation, 500.0f, RandomPoint);
+
+				// Deprecated function
+				// UNavigationSystemV1::GetRandomReachablePointInRadius(GetWorld(), MoveLocation, 500.0f, nullptr, nullptr)
+				
+				MoveActivityInst->SetLocation(RandomPoint.Location);
+			}
+			
+			Cast<ACyberneticController>(SpawnedCharacter->GetController())->AddActivity(MoveActivityInst, true);
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::FlushDeadBodies()
+{
+	for (TActorIterator<AReadyOrNotCharacter> It(GetWorld()); It; ++It)
+	{
+		AReadyOrNotCharacter* RonCharacter = *It;
+		
+		if (RonCharacter->IsDeadOrUnconscious())
+			RonCharacter->Destroy();
+	}
+}
+
+void AReadyOrNotPlayerController::DestroyAllItems()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TActorIterator<ABaseItem> It(GetWorld()); It; ++It)
+	{
+		ABaseItem* i = *It;
+		
+		if (Cast<ABaseMagazineWeapon>(i))
+		 	continue;
+
+		i->Destroy();
+	}
+}
+
+void AReadyOrNotPlayerController::DestroyAllItemMeshes()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TActorIterator<ABaseItem> It(GetWorld()); It; ++It)
+	{
+		ABaseItem* i = *It;
+		TArray<USkeletalMeshComponent*> SkelMeshComps;
+		i->GetComponents<USkeletalMeshComponent>(SkelMeshComps);
+		for (USkeletalMeshComponent* skel : SkelMeshComps)
+		{
+			skel->SetSkeletalMesh(nullptr);
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::HideAllItemMeshes()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TActorIterator<ABaseItem> It(GetWorld()); It; ++It)
+	{
+		ABaseItem* i = *It;
+		TArray<USkeletalMeshComponent*> SkelMeshComps;
+		i->GetComponents<USkeletalMeshComponent>(SkelMeshComps);
+		for (USkeletalMeshComponent* skel : SkelMeshComps)
+		{
+			skel->SetHiddenInGame(true);
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::UnhideAllItemMeshes()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TActorIterator<ABaseItem> It(GetWorld()); It; ++It)
+	{
+		ABaseItem* i = *It;
+		TArray<USkeletalMeshComponent*> SkelMeshComps;
+		i->GetComponents(SkelMeshComps);
+		for (USkeletalMeshComponent* skel : SkelMeshComps)
+		{
+			skel->SetHiddenInGame(false);
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::HideAllSmallItemMeshes()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TActorIterator<ABaseItem> It(GetWorld()); It; ++It)
+	{
+		ABaseItem* i = *It;
+		if (Cast<class AOptiwand>(i))
+			continue;
+
+		if (Cast<class ABaseWeapon>(i))
+			continue;
+
+		if (Cast<class ABaseArmour>(i))
+			continue;
+
+		TArray<USkeletalMeshComponent*> SkelMeshComps;
+		i->GetComponents(SkelMeshComps);
+		for (USkeletalMeshComponent* skel : SkelMeshComps)
+		{
+			skel->SetHiddenInGame(true);
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::UnhideAllSmallItemMeshes()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TActorIterator<ABaseItem> It(GetWorld()); It; ++It)
+	{
+		ABaseItem* i = *It;
+
+		if (Cast<class AOptiwand>(i))
+			continue;
+
+		if (Cast<class ABaseWeapon>(i))
+			continue;
+
+		if (Cast<class ABaseArmour>(i))
+			continue;
+
+		TArray<USkeletalMeshComponent*> SkelMeshComps;
+		i->GetComponents(SkelMeshComps);
+		for (USkeletalMeshComponent* skel : SkelMeshComps)
+		{
+			skel->SetHiddenInGame(false);
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::HideAllWeaponAttachments()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TActorIterator<ABaseItem> It(GetWorld()); It; ++It)
+	{
+		ABaseItem* i = *It;
+
+		if (Cast<class AOptiwand>(i))
+			continue;
+
+		if (Cast<class ABaseWeapon>(i))
+			continue;
+
+		if (Cast<class ABaseArmour>(i))
+			continue;
+
+		TArray<USkeletalMeshComponent*> WeaponAttachments; 
+		i->GetComponents(WeaponAttachments);
+		for (USkeletalMeshComponent* skel : WeaponAttachments)
+		{
+			skel->SetHiddenInGame(true);
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::UnhideAllWeaponAttachments()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TActorIterator<ABaseItem> It(GetWorld()); It; ++It)
+	{
+		ABaseItem* i = *It;
+
+		if (Cast<class AOptiwand>(i))
+			continue;
+
+		if (Cast<class ABaseWeapon>(i))
+			continue;
+
+		if (Cast<class ABaseArmour>(i))
+			continue;
+
+		TArray<USkeletalMeshComponent*> WeaponAttachments; 
+		i->GetComponents(WeaponAttachments);
+		for (USkeletalMeshComponent* skel : WeaponAttachments)
+		{
+			skel->SetHiddenInGame(false);
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::SwapAllItemSkeletalMeshesToCubes()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TActorIterator<ABaseItem> It(GetWorld()); It; ++It)
+	{
+		ABaseItem* i = *It;
+
+		TArray<USkeletalMeshComponent*> SkelMeshComps;
+		i->GetComponents(SkelMeshComps);
+		for (USkeletalMeshComponent* skel : SkelMeshComps)
+		{
+			skel->SetSkeletalMesh(TestCube);
+		}
+	}
+
+	for (TActorIterator<APlayerCharacter> It(GetWorld()); It; ++It)
+	{
+		APlayerCharacter* i = *It;
+
+		TArray<USkeletalMeshComponent*> SkelMeshComps; 
+		i->GetComponents(SkelMeshComps);
+		for (USkeletalMeshComponent* skel : SkelMeshComps)
+		{
+			skel->SetSkeletalMesh(TestCube);
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::DisableAllItemMaterials()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TActorIterator<ABaseItem> It(GetWorld()); It; ++It)
+	{
+		ABaseItem* i = *It;
+
+		TArray<USkeletalMeshComponent*> SkelMeshComps;
+		i->GetComponents(SkelMeshComps);
+		for (USkeletalMeshComponent* skel: SkelMeshComps)
+		{
+			for (int32 y = 0; y < skel->GetMaterials().Num(); y++)
+			{
+				skel->SetMaterial(y, TestMaterial);
+			}
+		}
+	}
+
+	for (TActorIterator<APlayerCharacter> It(GetWorld()); It; ++It)
+	{
+		APlayerCharacter* i = *It;
+
+		TArray<USkeletalMeshComponent*> SkelMeshComps;
+		i->GetComponents(SkelMeshComps);
+		for (USkeletalMeshComponent* skel : SkelMeshComps)
+		{
+			for (int32 y = 0; y < skel->GetMaterials().Num(); y++)
+			{
+				skel->SetMaterial(y, TestMaterial);
+			}
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::DisableAllMaterials()
+{
+	for (TObjectIterator<USkeletalMeshComponent>It;It;++It)
+	{
+		for (int32 y = 0; y < It->GetMaterials().Num(); y++)
+		{
+			It->SetMaterial(y, TestMaterial);
+		}
+	}
+
+	for (TObjectIterator<UStaticMeshComponent>It; It; ++It)
+	{
+		for (int32 y = 0; y < It->GetMaterials().Num(); y++)
+		{
+			It->SetMaterial(y, TestMaterial);
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::DisableSkeletalMeshShadowCasting()
+{
+	for (TObjectIterator<USkeletalMeshComponent>It;It;++It)
+	{
+		It->SetCastShadow(false);
+	}
+}
+
+void AReadyOrNotPlayerController::PlayAnimationFromLookupTable(FString AnimationRowName)
+{
+	for (TActorIterator<ACyberneticCharacter> It(GetWorld()); It; ++It)
+	{
+		ACyberneticCharacter* ai = *It;
+		ai->PlayMontageFromTable(AnimationRowName);
+	}
+}
+
+void AReadyOrNotPlayerController::Kill(float time)
+{
+	APlayerCharacter* pc = Cast<APlayerCharacter>(GetPawn());
+	if (!pc)
+		return;
+
+	if (time <= 0.0f)
+	{
+		time = 0.01f;
+	}
+	
+	FTimerHandle Handle;
+	GetWorld()->GetTimerManager().SetTimer(Handle, pc, &APlayerCharacter::Kill, time);
+}
+
+void AReadyOrNotPlayerController::TeleportUp()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	APlayerCharacter* pc = Cast<APlayerCharacter>(GetPawn());
+	if (!pc)
+		return;
+	FVector NewPos = pc->GetActorLocation()+FVector(0,0,400);
+	pc->SetActorLocation(NewPos);
+}
+
+void AReadyOrNotPlayerController::SetClubMusicMasterVolume(float Volume)
+{
+	for (TActorIterator<AFMODAmbientSound> It(GetWorld()); It; ++It)
+	{
+		UFMODAudioComponent* AudioComponent = (*It)->AudioComponent;
+
+		if (AudioComponent->ParameterCache.Find("ClubMusicMasterVolume"))
+		{
+			AudioComponent->SetParameter("ClubMusicMasterVolume", Volume);
+		
+			float UserValue = 0.0f, FinalValue = 0.0f;
+			AudioComponent->GetParameterValue("ClubMusicMasterVolume", UserValue, FinalValue);
+		
+			ULog::Info((*It)->GetName() + " | ClubMusicMasterVolume set to " + FString::SanitizeFloat(FinalValue));
+		}
+	}
+}
+
+/*void AReadyOrNotPlayerController::ClientRequestSteamAuth_Implementation()
+{
+	if (SteamUser())
+	{
+		uint8 rgchToken[1024];
+		uint32 unTokenLen = 0;
+		m_hAuthTicket = SteamUser()->GetAuthSessionTicket(rgchToken, sizeof(rgchToken), &unTokenLen);
+
+		FSteamAuthenticationToken SteamAuthToken;
+
+		SteamAuthToken.rgchTokenString = BytesToString(rgchToken, 1024);
+		SteamAuthToken.unTokenLen = unTokenLen;
+		SteamAuthToken.steamid = SteamUser()->GetSteamID().ConvertToUint64();
+
+		if (m_hAuthTicket != k_HAuthTicketInvalid)
+		{
+			ServerBeginSteamAuth(SteamAuthToken);
+		}
+		else
+		{
+			ClientReturnToMainMenuWithTextReason(NSLOCTEXT("ReadyOrNot", "UnableToAuthenticateWithSteam", "Unable to Authenticate with steam"));
+		}
+
+	}
+}
+
+bool AReadyOrNotPlayerController::ServerBeginSteamAuth_Validate(FSteamAuthenticationToken AuthToken)
+{
+	return true;
+}
+
+void AReadyOrNotPlayerController::ServerBeginSteamAuth_Implementation(FSteamAuthenticationToken AuthToken)
+{
+	if (SteamGameServer())
+	{
+		uint8 rgchToken[1024];
+		StringToBytes(AuthToken.rgchTokenString, rgchToken, 1024);
+
+		OnAuthTicketResponseCallback.Register(this, &AReadyOrNotPlayerController::OnAuthTicketResponse);
+		
+		V_LOGM(LogReadyOrNot, "Starting Steam Authentication for %s [%s]",
+                *FString::Printf(TEXT("%lld"), AuthToken.steamid), *FString::FromInt(m_hAuthTicket));
+		ClientsAuthToken = AuthToken;
+		if (k_EBeginAuthSessionResultOK != SteamGameServer()->BeginAuthSession(rgchToken, AuthToken.unTokenLen, AuthToken.steamid))
+		{
+			ClientReturnToMainMenuWithTextReason(NSLOCTEXT("ReadyOrNot", "UnableToAuthenticateWithSteam", "Unable to Authenticate with steam"));
+			SteamGameServer()->EndAuthSession(AuthToken.steamid);
+		} else
+		{
+			V_LOGM(LogReadyOrNot, "Steam Auth for %s verified succesfully!",
+                *FString::Printf(TEXT("%lld"), AuthToken.steamid));
+		}
+	}
+
+}
+
+void AReadyOrNotPlayerController::CancelSteamAuthForPlayerController()
+{
+	V_LOGM(LogReadyOrNot, "Canceling Steam Authentication for %s [%s]",
+		*FString::Printf(TEXT("%lld"), ClientsAuthToken.steamid), *FString::FromInt(m_hAuthTicket));
+
+	AReadyOrNotGameMode* ReadyOrNotGameMode = GetWorld()->GetAuthGameMode<AReadyOrNotGameMode>();
+	if (ReadyOrNotGameMode)
+	{
+		if (SteamGameServer())
+		{
+			if (ClientsAuthToken.steamid != 0)
+			{
+				SteamGameServer()->EndAuthSession(ClientsAuthToken.steamid);
+			}
+		}
+		// update the server affter a small delay
+		FTimerHandle DummyTimer;
+		GetWorld()->GetTimerManager().SetTimer(DummyTimer, ReadyOrNotGameMode, &AReadyOrNotGameMode::RefreshSession, 3.0f, false);
+	} else
+	{
+		if (SteamUser())
+		{
+			if (m_hAuthTicket != k_HAuthTicketInvalid)
+			{
+				SteamUser()->CancelAuthTicket(m_hAuthTicket);
+			}
+			
+		}
+	}
+}
+
+
+void AReadyOrNotPlayerController::OnAuthTicketResponse(ValidateAuthTicketResponse_t* CallbackData)
+{
+	if (!PlayerState)
+		return;
+	
+	uint64 PlayerSteamId = *((uint64*)PlayerState->GetUniqueId().GetUniqueNetId()->GetBytes());
+
+	if (CallbackData->m_SteamID == PlayerSteamId)
+	{
+		OnAuthTicketResponseCallback.Unregister();
+
+		if (CallbackData->m_eAuthSessionResponse > EAuthSessionResponse::k_EAuthSessionResponseOK)
+		{
+			ClientReturnToMainMenuWithTextReason(NSLOCTEXT("ReadyOrNot", "UnableToAuthenticateWithSteam", "Unable to Authenticate with steam"));
+		}
+	}
+	
+}*/
+
+bool AReadyOrNotPlayerController::CanSetDepotTo(int32 NewDepot, bool bSameDepot)
+{
+	ACoopGS* gs = Cast<ACoopGS>(GetWorld()->GetGameState());
+	if (!gs)
+	{
+		return false;
+	}
+
+	AReadyOrNotPlayerState* ps = Cast<AReadyOrNotPlayerState>(PlayerState);
+	if (!ps->bSquadLeader)
+	{
+		return false;
+	}
+
+	if (gs->DepotNumber == NewDepot)
+	{
+		return bSameDepot;
+	}
+
+	FLevelDataLookupTable LevelData = UBpGameplayHelperLib::GetLevelData(GetWorld());
+	if (!LevelData.DeployableDepots.IsValidIndex(NewDepot))
+	{
+		return false;
+	}
+
+	int32 SquadPointsAvailable = gs->SquadPointsRemaining + gs->DepotCost;
+	return LevelData.DeployableDepots[NewDepot].DepotCost <= SquadPointsAvailable;
+}
+
+void AReadyOrNotPlayerController::Server_SetDeployableDepot_Implementation(int32 NewDepot)
+{
+	ACoopGS* gs = Cast<ACoopGS>(GetWorld()->GetGameState());
+	if (!gs)
+	{
+		return;
+	}
+
+	gs->Server_SetDeployableDepot_Implementation(this, NewDepot);
+}
+
+void AReadyOrNotPlayerController::SetAimAssistIntensity(FString NewAimAssistIntensity)
+{
+	AimAssistIntensity = NewAimAssistIntensity;
+}
+
+void AReadyOrNotPlayerController::MoveUp()
+{
+	bMoveUp = true;
+}
+
+void AReadyOrNotPlayerController::StopMovingUp()
+{
+	bMoveUp = false;
+}
+
+void AReadyOrNotPlayerController::MoveDown()
+{
+	bMoveDown = true;
+}
+
+void AReadyOrNotPlayerController::StopMovingDown()
+{
+	bMoveDown = false;
+}
+
+void AReadyOrNotPlayerController::AddYaw(float Val)
+{
+	float sensitivity;
+	UBpGameplayHelperLib::GetMouseSensitivity(sensitivity);
+	DemoRecorderRotation.Yaw += (Val * sensitivity * 20.0f);
+}
+
+void AReadyOrNotPlayerController::AddPitch(float Val)
+{
+	float sensitivity;
+	UBpGameplayHelperLib::GetMouseSensitivity(sensitivity);
+	DemoRecorderRotation.Pitch -= (Val * sensitivity * 20.0f);
+}
+
+void AReadyOrNotPlayerController::MoveForward(float Val)
+{
+	DemoRecorderLocation += (Val * GetControlRotation().Vector()) * SpeedMultiplier;
+}
+
+void AReadyOrNotPlayerController::MoveRight(float Val)
+{
+	DemoRecorderLocation += (Val * UKismetMathLibrary::GetRightVector(GetControlRotation())) * SpeedMultiplier;
+}
+
+void AReadyOrNotPlayerController::AdjustSpeed(float Val)
+{
+	SpeedMultiplier = FMath::Clamp(SpeedMultiplier + Val, 0.01f, 100.0f);
+}
+
+void AReadyOrNotPlayerController::SetPlayer(UPlayer* InPlayer)
+{
+	Super::SetPlayer(InPlayer);
+
+	if (/*ULocalPlayer* const LocalPlayer = */Cast<ULocalPlayer>(Player))
+	{
+#if defined(WITH_ACHIEVEMENTS_V1)
+	// Handled by AchievementSubsystem from V1
+#else		
+		QueryAchievements();
+#endif		
+	}
+}
+
+void AReadyOrNotPlayerController::Equip(const FString ItemName)
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+
+	Server_Equip(ItemName);
+}
+
+void AReadyOrNotPlayerController::Server_Equip_Implementation(const FString& ItemName)
+{
+	APlayerCharacter* pc = Cast<APlayerCharacter>(GetPawn());
+	if (!pc)
+		return;
+	
+	UClass* ItemClass = ULoadoutManager::GetItemByLookupIdx(GetWorld(), *ItemName);
+	if (ItemClass)
+	{
+		ABaseItem* bi = GetWorld()->SpawnActor<ABaseItem>(ItemClass);
+		if (bi)
+		{
+			pc->GetInventoryComponent()->AddInventoryItem(bi);
+			pc->GetInventoryComponent()->PutItemInHands(bi);
+		}
+	}
+	
+	// if (FItemLookupTable* Row = UBpGameplayHelperLib::GetItemLookupDataTable()->FindRow<FItemLookupTable>(*ItemName, "AReadyOrNotPlayerController::Equip"))
+	// {
+	// 	UClass* ItemClass = Row->BlueprintClass.LoadSynchronous();
+	// 	ABaseItem* bi = GetWorld()->SpawnActor<ABaseItem>(ItemClass);
+	// 	if (bi)
+	// 	{
+	// 		pc->GetInventoryComponent()->AddInventoryItem(bi);
+	// 		pc->GetInventoryComponent()->PutItemInHands(bi);
+	// 	}
+	// }
+}
+
+void AReadyOrNotPlayerController::EnableWeaponFovShader()
+{
+	if (const AReadyOrNotCharacter* OwningCharacter = Cast<AReadyOrNotCharacter>(GetCharacter()))
+	{
+		for (ABaseItem* Item : OwningCharacter->GetInventoryComponent()->GetInventoryItems())
+		{
+			if (IsValid(Item))
+			{
+				Item->EnableWeaponFovShader();
+			}
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::DisableWeaponFovShader()
+{
+	if (const AReadyOrNotCharacter* OwningCharacter = Cast<AReadyOrNotCharacter>(GetCharacter()))
+	{
+		for (ABaseItem* Item : OwningCharacter->GetInventoryComponent()->GetInventoryItems())
+		{
+			if (IsValid(Item))
+			{
+				Item->DisableWeaponFovShader();
+			}
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::EnableScopeAlignmentTool()
+{
+	bDrawScopeAlignmentTrace = true;
+}
+
+void AReadyOrNotPlayerController::ApplyWeaponSkin(FString SkinName)
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	APlayerCharacter* pc = Cast<APlayerCharacter>(GetPawn());
+	if (!pc)
+		return;
+
+	if (!pc->GetEquippedItem())
+		return;
+
+	for (TObjectIterator<UClass> It; It; ++It)
+	{
+	UClass* ItrClass = *It;
+	if (!ItrClass)
+		continue;
+
+	if (!It->HasAnyClassFlags(CLASS_Abstract))
+	{
+		if (It->GetName().Contains(SkinName))
+		{
+			if (It->IsChildOf(USkinComponent::StaticClass()))
+			{
+				USkinComponent* SkinComp = NewObject<USkinComponent>(pc->GetEquippedItem(), *It);
+				if (SkinComp)
+				{
+					SkinComp->RegisterComponent();
+					break;
+				}
+			}
+		}
+	}
+	}
+}
+
+void AReadyOrNotPlayerController::RemoveWeaponSkin()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	APlayerCharacter* pc = Cast<APlayerCharacter>(GetPawn());
+	if (!pc)
+		return;
+
+	if (!pc->GetEquippedItem())
+		return;
+
+	TArray<USkinComponent*> SkinComps;
+	pc->GetEquippedItem()->GetComponents(SkinComps);
+	for (int32 i = 0; i < SkinComps.Num(); i++)
+	{
+		USkinComponent* SkinComp = SkinComps[i];
+		if (SkinComp)
+		{
+			SkinComp->ResetSkin();
+			SkinComp->DestroyComponent();
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::ApplyCharacterSkin(FString SkinName)
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	APlayerCharacter* pc = Cast<APlayerCharacter>(GetPawn());
+	if (!pc)
+		return;
+
+	for (TObjectIterator<UClass> It; It; ++It)
+	{
+		UClass* ItrClass = *It;
+		if (!ItrClass)
+			continue;
+
+		if (!It->HasAnyClassFlags(CLASS_Abstract))
+		{
+			if (It->GetName().Contains(SkinName))
+			{
+				if (It->IsChildOf(USkinComponent::StaticClass()))
+				{
+					USkinComponent* SkinComp = NewObject<USkinComponent>(pc, *It);
+					if (SkinComp)
+					{
+						SkinComp->RegisterComponent();
+						break;
+					}
+				}
+			}
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::RemoveCharacterSkin()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	APlayerCharacter* pc = Cast<APlayerCharacter>(GetPawn());
+	if (!pc)
+		return;
+
+	TArray<USkinComponent*> SkinComps;
+	pc->GetComponents(SkinComps);
+	for (int32 i = 0; i < SkinComps.Num(); i++)
+	{
+		USkinComponent* SkinComp = SkinComps[i];
+		if (SkinComp)
+		{
+			SkinComp->ResetSkin();
+			SkinComp->DestroyComponent();
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::GiveSWATRam()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TActorIterator<ADoorRam> It(GetWorld()); It; ++It)
+	{
+		ADoorRam* Ram = *It;
+		if (Ram)
+		{
+			for (TActorIterator<ASWATCharacter> SWATIt(GetWorld()); SWATIt;)
+			{
+				ASWATCharacter* SWAT = *SWATIt;
+				SWAT->GetInventoryComponent()->AddInventoryItem(Ram);
+				return;
+			}
+
+		}
+
+	}
+	
+}
+
+void AReadyOrNotPlayerController::WinCoop()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TActorIterator<ACyberneticCharacter>It(GetWorld()); It; ++It)
+	{
+		ACyberneticCharacter* Ai = *It;
+		if (Ai->GetTeam() == ETeamType::TT_SUSPECT || Ai->GetTeam() == ETeamType::TT_CIVILIAN)
+		{
+			if (!Ai->IsDeadOrUnconscious())
+			{
+				Ai->Surrender();
+				Ai->ArrestComplete(Cast<APlayerCharacter>(GetPawn()), Cast<AZipcuffs>(Cast<APlayerCharacter>(GetPawn())->GetInventoryComponent()->GetInventoryItemOfClass(AZipcuffs::StaticClass())));
+			}
+			
+			IReportable::Execute_ReportToTOC(Ai, Cast<APlayerCharacter>(GetPawn()), false);
+		}
+	}
+	for (TActorIterator<ABaseItem>It(GetWorld()); It; ++It)
+	{
+		ABaseItem* Item = *It;
+		if (Item->IsEvidence())
+		{
+			Cast<APlayerCharacter>(GetPawn())->Server_CollectEvidence_Implementation(Item);
+		}
+	}
+
+	for (TActorIterator<AIncapacitatedHuman>It(GetWorld()); It; ++It)
+	{
+		Cast<APlayerCharacter>(GetPawn())->Server_ReportToTOC(*It);
+	}
+
+	for (TActorIterator<ATrapActor>It(GetWorld()); It; ++It)
+	{
+		It->OnTrapDisarmed();
+	}
+	for (TActorIterator<AEvidenceActor>It(GetWorld()); It; ++It)
+	{
+		AEvidenceActor* EvidenceActor = *It;
+		EvidenceActor->ActorPickedUp(GetPawn());
+	}
+
+	for (TObjectIterator<UScoringComponent>It; It; ++It)
+	{
+		if (It->bEnabled && !It->ScoringData.HasGivenAllScores())
+		{
+			if (It->GetWorld() == GetWorld())
+			{
+				V_LOGM(LogReadyOrNot, "%s has not given all scoring data (Owner: %s)", *It->GetName(), *It->GetOwner()->GetName());
+			}
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::SetHostMigrationComplete_Implementation()
+{
+	UHostMigrationManager* HostMigrationManager = UReadyOrNotStatics::GetReadyOrNotGameInstance()->HostMigrationManager;
+	if (HostMigrationManager)
+	{
+		HostMigrationManager->SetHostMigrationInProgress(false);
+	}
+}
+
+void AReadyOrNotPlayerController::DebugMigrateHost()
+{
+	for (TActorIterator<AReadyOrNotPlayerController>It(GetWorld()); It; ++It)
+	{
+		It->DebugClientStartHostMigration();
+	}
+}
+
+void AReadyOrNotPlayerController::DebugClientStartHostMigration_Implementation()
+{
+	UReadyOrNotStatics::GetReadyOrNotGameInstance()->StartHostMigration();
+}
+
+void AReadyOrNotPlayerController::EquipAndDropEvidence()
+{
+#if UE_BUILD_DEVELOPMENT
+	for (TActorIterator<ASuspectCharacter>It(GetWorld()); It; ++It)
+	{
+		It->EquipLoadoutOnAI(true);
+		FTimerHandle TH_Temp;
+		GetWorld()->GetTimerManager().SetTimer(TH_Temp, It->GetInventoryComponent(), &UInventoryComponent::ThrowEquippedItem, 2.0f, false);
+	}
+#endif
+}
+
+void AReadyOrNotPlayerController::SoftWinCoop()
+{
+#if UE_BUILD_DEVELOPMENT
+	if (!GetPawn())
+		return;
+	
+	for (TActorIterator<ACyberneticCharacter>It(GetWorld()); It; ++It)
+	{
+		ACyberneticCharacter* Ai = *It;
+		if (Ai->GetTeam() == ETeamType::TT_SUSPECT || Ai->GetTeam() == ETeamType::TT_CIVILIAN)
+		{
+			Ai->Surrender();
+			Ai->ArrestComplete(Cast<APlayerCharacter>(GetPawn()),
+                Cast<AZipcuffs>(Cast<APlayerCharacter>(GetPawn())->GetInventoryComponent()->GetInventoryItemOfClass(AZipcuffs::StaticClass())));
+		}
+	}
+#endif
+}
+
+void AReadyOrNotPlayerController::KnockoutAllEnemies()
+{
+#if UE_BUILD_DEVELOPMENT
+	for (TActorIterator<ACyberneticCharacter> It(GetWorld()); It; ++It)
+	{
+		ACyberneticCharacter* cc = *It;
+		cc->Knockout(10.0f);
+	}
+#endif
+}
+
+void AReadyOrNotPlayerController::ArrestAll(ETeamType TargetTeam)
+{
+#if UE_BUILD_DEVELOPMENT
+	if (!GetPawn())
+		return;
+	
+	for (TActorIterator<ACyberneticCharacter> It(GetWorld()); It; ++It)
+	{
+		ACyberneticCharacter* CyberneticCharacter = *It;
+		if (CyberneticCharacter && CyberneticCharacter->GetTeam() == TargetTeam)
+		{
+			CyberneticCharacter->Surrender();
+			CyberneticCharacter->ArrestComplete(Cast<APlayerCharacter>(GetPawn()),
+				Cast<AZipcuffs>(Cast<APlayerCharacter>(GetPawn())->GetInventoryComponent()->GetInventoryItemOfClass(AZipcuffs::StaticClass())));
+		}
+	}
+#endif
+}
+
+void AReadyOrNotPlayerController::KillAll(ETeamType TargetTeam)
+{
+#if UE_BUILD_DEVELOPMENT
+	for (TActorIterator<ACyberneticCharacter> It(GetWorld()); It; ++It)
+	{
+		if (!GetPawn())
+			return;
+	
+		ACyberneticCharacter* CyberneticCharacter = *It;
+		if (CyberneticCharacter && CyberneticCharacter->GetTeam() == TargetTeam)
+		{
+			FDamageEvent ConsoleDamageEvent = FDamageEvent();
+			ConsoleDamageEvent.DamageTypeClass = UDamageType::StaticClass();
+			CyberneticCharacter->TakeDamage(999.0f, ConsoleDamageEvent, nullptr, CyberneticCharacter);
+		}
+	}
+#endif
+}
+
+void AReadyOrNotPlayerController::PlayDeadAllEnemies()
+{
+#if UE_BUILD_DEVELOPMENT
+	for (TActorIterator<ACyberneticCharacter> It(GetWorld()); It; ++It)
+	{
+		ACyberneticCharacter* cc = *It;
+		if (cc->GetTeam() == ETeamType::TT_SUSPECT)
+		{
+			cc->PlayDead(10.0f, false);
+		} else  
+		{
+			cc->Destroy();
+		}
+	}
+#endif
+}
+
+void AReadyOrNotPlayerController::DestroyAllWidgets()
+{
+#if UE_BUILD_DEVELOPMENT
+
+	for (TObjectIterator<UUserWidget> Itr; Itr; ++Itr)
+	{
+		UUserWidget* LiveWidget = *Itr;
+
+		/* If the Widget has no World, Ignore it (It's probably in the Content Browser!) */
+		if (!LiveWidget->GetWorld() || LiveWidget->GetWorld() != GetWorld() || !LiveWidget->IsInViewport())
+		{
+			continue;
+		}
+		
+		LiveWidget->RemoveFromParent();
+	}
+#endif
+}
+
+void AReadyOrNotPlayerController::ToggleRTXDMO()
+{
+#if UE_BUILD_DEVELOPMENT
+
+#if defined RTX_DMO
+	if (UBpVideoSettingsLib::SupportsRayTracing())
+	{
+
+		bRTXDMOOn = !bRTXDMOOn;
+	}
+	else
+	{
+		bRTXDMOOn = false;
+	}
+	FString ToggleRTXStr = (bRTXDMOOn ? "On" : "Off");
+	V_LOGM(LogReadyOrNot, "Toggle RTX %s", *ToggleRTXStr);
+	OnRTXDMOChanged.Broadcast(bRTXDMOOn);
+	UReadyOrNotGameUserSettings* Settings = Cast<UReadyOrNotGameUserSettings>(GEngine->GameUserSettings);
+	if (Settings)
+	{
+		Settings->bRayTracingEnabled = bRTXDMOOn;
+		Settings->ApplySettings(true);
+	}
+#endif
+#endif
+}
+
+void AReadyOrNotPlayerController::ArrestOne()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TActorIterator<APlayerCharacter>It(GetWorld()); It; ++It)
+	{
+		APlayerCharacter* pc = *It;
+		if (UBpGameplayHelperLib::GetLocalPlayerCharacter(GetWorld())->GetTeam() == pc->GetTeam())
+		{
+			pc->ArrestComplete(UBpGameplayHelperLib::GetLocalPlayerCharacter(GetWorld()), Cast<AZipcuffs>(pc->GetInventoryComponent()->GetInventoryItemOfClass(AZipcuffs::StaticClass())));
+			break;
+		}
+
+
+	}
+}
+
+void AReadyOrNotPlayerController::ToggleGodModeOnEveryone()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	for (TActorIterator<AReadyOrNotCharacter> It(GetWorld()); It; ++It)
+	{
+		AReadyOrNotCharacter* pc = *It;
+		pc->SetGodMode(!pc->HasGodMode());
+	}
+}
+
+void AReadyOrNotPlayerController::SpawnBotsForGame(int32 BotCount)
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	AReadyOrNotGameMode* gm = Cast<AReadyOrNotGameMode>(GetWorld()->GetAuthGameMode());
+	if (!gm)
+		return;
+	
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+	SpawnParams.bNoFail = true;
+	FTransform SpawnTransform = FTransform();
+	for (int32 i = 0; i < BotCount * 0.5f; i++ )
+	{
+		SpawnTransform.SetScale3D(FVector(1.0f));
+
+		FActorSpawnParameters SpawnInfo;
+		SpawnInfo.Instigator = GetInstigator();
+		SpawnInfo.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		SpawnInfo.OverrideLevel = GetLevel();
+		SpawnInfo.ObjectFlags |= RF_Transient;	// We never want to save AI controllers into a map
+		AController* NewController = GetWorld()->SpawnActor<AController>(ACyberneticController::StaticClass(), FTransform(), SpawnInfo);
+		if (NewController != nullptr)
+		{
+			AReadyOrNotPlayerState* ps = Cast<AReadyOrNotPlayerState>(NewController->PlayerState);
+			if (ps)
+			{
+				// Set loadout
+				FSavedLoadout Loadout;
+				UBpGameplayHelperLib::LoadLoadout(Loadout, "default");
+				//UWorld* World = GetWorld();
+				ps->SetPlayerName("Blue Bot #" + FString::FromInt(i));
+				ps->Server_SetLoadout(Loadout);
+				ps->bSpawnLoadout = true;
+				ps->SetTeam(ETeamType::TT_SERT_BLUE);
+			}
+			
+			AActor* Start = gm->FindPlayerStart(NewController);
+			if (Start)
+			{
+				APlayerCharacter* bot = GetWorld()->SpawnActor<APlayerCharacter>(gm->BlueCharacterClass.LoadSynchronous(), Start->GetActorTransform(), SpawnParams);
+				if (bot)
+				{
+					bot->GetCharacterMovement()->RotationRate = FRotator::ZeroRotator;
+					NewController->Possess(bot);
+
+					bot->OnCharacterKilled.RemoveDynamic(gm, &AReadyOrNotGameMode::PlayerKilled);
+					bot->OnCharacterKilled.AddDynamic(gm, &AReadyOrNotGameMode::PlayerKilled);
+					bot->OnPlayerArrested.RemoveDynamic(gm, &AReadyOrNotGameMode::PlayerArrested);
+					bot->OnPlayerArrested.AddDynamic(gm, &AReadyOrNotGameMode::PlayerArrested);
+					bot->OnCharacterTakeDamage.RemoveDynamic(gm, &AReadyOrNotGameMode::PlayerTakenDamage);
+					bot->OnCharacterTakeDamage.AddDynamic(gm, &AReadyOrNotGameMode::PlayerTakenDamage);
+					bot->OnPlayerFreed.RemoveDynamic(gm, &AReadyOrNotGameMode::PlayerFreed);
+					bot->OnPlayerFreed.AddDynamic(gm, &AReadyOrNotGameMode::PlayerFreed);
+					
+				}
+			}
+		}
+	}
+	for (int32 i = 0; i < BotCount * 0.5f; i++ )
+	{
+		SpawnTransform.SetScale3D(FVector(1.0f));
+
+		FActorSpawnParameters SpawnInfo;
+		SpawnInfo.Instigator = GetInstigator();
+		SpawnInfo.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		SpawnInfo.OverrideLevel = GetLevel();
+		SpawnInfo.ObjectFlags |= RF_Transient;	// We never want to save AI controllers into a map
+		AController* NewController = GetWorld()->SpawnActor<AController>(ACyberneticController::StaticClass(), FTransform(), SpawnInfo);
+		if (NewController != nullptr)
+		{
+			AReadyOrNotPlayerState* ps = Cast<AReadyOrNotPlayerState>(NewController->PlayerState);
+			if (ps)
+			{
+				// Set loadout
+				FSavedLoadout Loadout;
+				UBpGameplayHelperLib::LoadLoadout(Loadout, "default");
+				//UWorld* World = GetWorld();
+				ps->SetPlayerName("Red Bot #" + FString::FromInt(i));
+				ps->Server_SetLoadout(Loadout);
+				ps->bSpawnLoadout = true;
+				ps->SetTeam(ETeamType::TT_SERT_RED);
+			}
+			
+			AActor* Start = gm->FindPlayerStart(NewController);
+			if (Start)
+			{
+				APlayerCharacter* bot = GetWorld()->SpawnActor<APlayerCharacter>(gm->RedCharacterClass.LoadSynchronous(), Start->GetActorTransform(), SpawnParams);
+				if (bot)
+				{
+					bot->GetCharacterMovement()->RotationRate = FRotator::ZeroRotator;
+					NewController->Possess(bot);
+
+					bot->OnCharacterKilled.AddDynamic(gm, &AReadyOrNotGameMode::PlayerKilled);
+					bot->OnPlayerArrested.AddDynamic(gm, &AReadyOrNotGameMode::PlayerArrested);
+					bot->OnCharacterTakeDamage.AddDynamic(gm, &AReadyOrNotGameMode::PlayerTakenDamage);
+					bot->OnPlayerFreed.AddDynamic(gm, &AReadyOrNotGameMode::PlayerFreed);
+					
+				}
+			}
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::TestSendCrash()
+{
+	/*F
+
+	FHttpModule* Http = &FHttpModule::Get();
+	SharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = Http->CreateRequest();
+	TSharedPtr<FJsonObject> JsonObject = MakeShareable(new FJsonObject);
+	Request->SetHeader(TEXT("User-Agent"), TEXT("X-UnrealEngine-Agent"));
+	Request->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
+	FString APIKey;
+	GConfig->GetString(
+        TEXT("BanServerAPI"),
+        TEXT("BanServerAPIToken"),
+        APIKey,
+        GGameIni
+    );
+	Request->SetVerb("POST");
+	Request->SetURL(FString::Printf(TEXT("http://127.0.0.1:5001/reportcrash/ReadyOrNot.log")));
+	Request->SetContentAsString(OutLog);
+	Request->ProcessRequest();*/
+
+	/*
+	FString ReadyOrNotLog = FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir()) + "../Saved/Logs/ReadyOrNot.log";
+	V_LOGM(LogReadyOrNot, "Reading %s", *ReadyOrNotLog);
+	FString OutLog;
+	FFileHelper::LoadFileToString(OutLog, *ReadyOrNotLog);
+	V_LOGM(LogReadyOrNot, "OutLog: %s", *OutLog);
+
+	std::string body = std::string(TCHAR_TO_UTF8(*OutLog));
+	httplib::Client cli("http://192.168.1.18:5001");
+	auto res = cli.Post("/reportcrash/ReadyOrNot.log", body.size(),
+[body](size_t offset, size_t length, httplib::DataSink &sink) {
+  	
+sink.write(body.data() + offset, length);
+return true; // return 'false' if you want to cancel the request.
+},
+"X-UnrealEngine-Agent");
+*/
+}
+
+void AReadyOrNotPlayerController::PS5ActivityStart(FString& Activity)
+{
+#if defined(TARGET_PS5)
+	UPS5ActivitiesStatics::ActivityStart(GetWorld(),Activity);
+#endif
+}
+
+void AReadyOrNotPlayerController::PS5ActivityEnd(FString& Activity, int Outcome)
+{
+#if defined(TARGET_PS5)
+	EOnlineActivityOutcome OutcomeE;
+	if (Outcome == 0)
+		OutcomeE = EOnlineActivityOutcome::Completed;
+	if (Outcome == 1)
+		OutcomeE = EOnlineActivityOutcome::Failed;
+	if (Outcome == 2)
+		OutcomeE = EOnlineActivityOutcome::Cancelled;
+		
+	UPS5ActivitiesStatics::ActivityEnd(GetWorld(), Activity, OutcomeE);
+#endif
+}
+
+void AReadyOrNotPlayerController::PS5ActivitySetAvailable(FString& Activity, bool bAvailable)
+{
+#if defined(TARGET_PS5)
+	UPS5ActivitiesStatics::ActivitySetAvailable(GetWorld(), Activity, bAvailable);
+#endif
+}
+
+void AReadyOrNotPlayerController::PS5ResetAllActiveActivities()
+{
+#if defined(TARGET_PS5)
+	UPS5ActivitiesStatics::ResetAllActiveActivities(GetWorld());
+#endif
+}
+
+void AReadyOrNotPlayerController::ConsoleSetMaxPlayers(int MaxPlayers)
+{
+#if defined(TARGET_CONSOLE)
+	UConsoleMultiplayerStatics::SetMaxPlayers(GetWorld(), MaxPlayers);
+#endif
+}
+
+void AReadyOrNotPlayerController::PrintGPUBrand()
+{
+	FString DeviceDescription;
+	FString GPU = FPlatformMisc::GetPrimaryGPUBrand();
+	//FWindowsPlatformMisc::GetGPUDriverInfo(DeviceDescription);
+
+	FString HasRTXCard = UBpVideoSettingsLib::HasRTXCard() ? "true" : "false";
+	FString SupportsRTX = UBpVideoSettingsLib::SupportsRayTracing() ? "true" : "false";
+	FString CommandLineOptions = FCommandLine::Get();
+	FString LaunchedInDx12 = CommandLineOptions.Contains("-dx12") ? "true" : "false";
+	V_LOGM(LogReadyOrNot, "GPU: %s, Has RTX Card? %s Supports Ray Tracing? %s", *GPU, *HasRTXCard, *SupportsRTX);
+	V_LOGM(LogReadyOrNot, "GPU List: %s", *UBpVideoSettingsLib::GetGPUList());
+	V_LOGM(LogReadyOrNot, "Command Line Options: %s", *CommandLineOptions);
+	V_LOGM(LogReadyOrNot, "Launched In DX12? %s", *LaunchedInDx12);
+}
+
+bool AReadyOrNotPlayerController::SaveFileToUserCloud(FString FullPath)
+{
+	IOnlineSubsystem* OnlineSub = IOnlineSubsystem::Get();
+	if (OnlineSub)
+	{
+		IOnlineUserCloudPtr UserCloud = OnlineSub->GetUserCloudInterface();
+		if (UserCloud.IsValid())
+		{
+			TArray<uint8> FileContents;
+			if (FFileHelper::LoadFileToArray(FileContents, *FullPath))
+			{
+				ULocalPlayer* LocalPlayer = GetLocalPlayer();
+				TSharedPtr<const FUniqueNetId> UniqueNetId = LocalPlayer->GetPreferredUniqueNetId().GetUniqueNetId();
+				FOnWriteUserFileCompleteDelegate WriteUserFileCompleteDelegate;
+				WriteUserFileCompleteDelegate.BindUObject(this, &AReadyOrNotPlayerController::OnFileSavedTouserCloud);
+				UserCloud->AddOnWriteUserFileCompleteDelegate_Handle(WriteUserFileCompleteDelegate);
+				//GEngine->AddOnScreenDebugMessage(-1, 30.0f, FColor::Green, "Saving file (" + FullPath + ") to steam cloud ");
+				return UserCloud->WriteUserFile(*UniqueNetId, FullPath, FileContents);
+			}
+		}
+	}
+	return false;
+}
+
+void AReadyOrNotPlayerController::OnFileSavedTouserCloud(bool bWasSuccessful, const FUniqueNetId& UniqueNetId, const FString& FilePath)
+{
+	//GEngine->AddOnScreenDebugMessage(-1, 30.0f, bWasSuccessful ? FColor::Green : FColor::Red, "Saved file (" + FilePath + ") to steam cloud " + (bWasSuccessful ? "successfully" : "unsuccessfully"));
+}
+
+void AReadyOrNotPlayerController::MakeCrash()
+{
+#if UE_BUILD_SHIPPING
+	return;
+#endif
+	AActor* Test = nullptr;
+	Test->SetActorLocation(FVector::ZeroVector);
+}
+
+bool AReadyOrNotPlayerController::IsCameraFading()
+{
+	if (PlayerCameraManager)
+	{
+		return PlayerCameraManager->bEnableFading;
+	}
+	return false;
+}
+
+void AReadyOrNotPlayerController::PossessOrbitalCamera()
+{
+// Allow psosession withut authority because this camera is on a streamed level that may not be valid on the server
+	bCanPossessWithoutAuthority = true;
+	for (TActorIterator<APawn> It(GetWorld()); It; ++It)
+	{
+		APawn* p = *It;
+		if (p->Tags.Contains("OrbitalCameraActor"))
+		{
+			Possess(p);
+			break;
+		}
+	}
+	bCanPossessWithoutAuthority = false;
+} 
+
+void AReadyOrNotPlayerController::SpectateNextPlayer()
+{
+	ASpectatePawn* SpectatePawn = Cast<ASpectatePawn>(GetPawn());
+	if (SpectatePawn)
+	{
+		SpectatePawn->SpectateNextPlayer();
+	}
+}
+
+void AReadyOrNotPlayerController::SpectatePreviousPlayer()
+{
+	ASpectatePawn* SpectatePawn = Cast<ASpectatePawn>(GetPawn());
+	if (SpectatePawn)
+	{
+		SpectatePawn->SpectatePreviousPlayer();
+	}
+}
+
+void AReadyOrNotPlayerController::RetrieveChatLog(TArray<FRChatMessage>& OutMessages)
+{
+	OutMessages = ChatMessages;
+}
+
+void AReadyOrNotPlayerController::SaveChatMessage(FRChatMessage Message)
+{
+	ChatMessages.Add(Message);
+}
+
+void AReadyOrNotPlayerController::SetRosterStressValue(float Stress)
+{
+	if (!GetWorld())
+		return;
+	
+	ALobbyGM* LobbyGM = GetWorld()->GetAuthGameMode<ALobbyGM>();
+	if (!LobbyGM || !LobbyGM->RosterManager)
+		return;
+
+	URosterManager* RosterManager = LobbyGM->RosterManager;
+	for (URosterCharacter* RosterCharacter : RosterManager->GetAllCharacters())
+	{
+		RosterCharacter->StressLevel = Stress;
+	}
+
+	URosterSelectionWidget::UpdateAllRosterWidgets(GetWorld());
+}
+
+void AReadyOrNotPlayerController::RosterInstantFinishStatus()
+{
+	if (!GetWorld())
+		return;
+	
+	ALobbyGM* LobbyGM = GetWorld()->GetAuthGameMode<ALobbyGM>();
+	if (!LobbyGM || !LobbyGM->RosterManager)
+		return;
+
+	URosterManager* RosterManager = LobbyGM->RosterManager;
+	for (URosterCharacter* RosterCharacter : RosterManager->GetAllCharacters())
+	{
+		if (RosterCharacter->State == ERosterCharacterState::InTherapy)
+			RosterCharacter->StressLevel = 0.0f;
+		
+		RosterCharacter->State = ERosterCharacterState::Available;
+		RosterCharacter->MissionsUntilReturn = 0;
+	}
+
+	URosterSelectionWidget::UpdateAllRosterWidgets(GetWorld());
+}
+
+void AReadyOrNotPlayerController::SetTimelimit(float NewTime)
+{
+	AReadyOrNotGameMode* gm = GetWorld()->GetAuthGameMode<AReadyOrNotGameMode>();
+	if (!gm)
+	{
+		return;
+	}
+	AReadyOrNotGameSession* Session = gm->GetReadyOrNotGameSession();
+	if (!Session)
+	{
+		return;
+	}
+
+	Session->SetServerSettings(Session->RoundTimerGameStart, Session->RoundTimerBetweenMaps, Session->ReinforcementTimer, NewTime, Session->RoundsPerMap, Session->Scorelimit);
+	AReadyOrNotGameState* gs = Cast<AReadyOrNotGameState>(GetWorld()->GetGameState());
+	if (!gs)
+	{
+		return;
+	}
+	gs->ResetReplicatedTimers();
+}
+
+void AReadyOrNotPlayerController::SetScorelimit(int32 NewScorelimit)
+{
+	AReadyOrNotGameMode* gm = GetWorld()->GetAuthGameMode<AReadyOrNotGameMode>();
+	if (!gm)
+	{
+		return;
+	}
+	AReadyOrNotGameSession* Session = gm->GetReadyOrNotGameSession();
+	if (!Session)
+	{
+		return;
+	}
+
+	Session->SetServerSettings(Session->RoundTimerGameStart, Session->RoundTimerBetweenMaps, Session->ReinforcementTimer, Session->Timelimit, Session->RoundsPerMap, NewScorelimit);
+	AReadyOrNotGameState* gs = Cast<AReadyOrNotGameState>(GetWorld()->GetGameState());
+	if (!gs)
+	{
+		return;
+	}
+	gs->ResetReplicatedTimers();
+}
+
+void AReadyOrNotPlayerController::DeleteAnyNonMeshComponents()
+{
+	for (TActorIterator<APlayerCharacter> It(GetWorld()); It; ++It)
+	{
+		APlayerCharacter* pc = *It;
+		TArray<UActorComponent*> ActorComponents;
+		pc->GetComponents(ActorComponents);
+		for (UActorComponent* a : ActorComponents)
+		{
+			if (a != pc->GetMesh()
+				&& a != pc->GetCapsuleComponent()
+				&& a != pc->GetMesh1P()
+				&& a != pc->GetMeshBody()
+				&& a != pc->GetFaceMesh()
+				&& a != pc->GetFirstPersonCameraComponent()
+				&& a != pc->GetCharacterMovement())
+			{
+				a->DestroyComponent();
+			}
+		}
+		
+	}
+
+	for (TActorIterator<ABaseItem> It(GetWorld()); It; ++It)
+	{
+		ABaseItem* bi = *It;
+		TArray<UActorComponent*> ActorComponents;
+		bi->GetComponents(ActorComponents);
+		for (UActorComponent* a : ActorComponents)
+		{
+			if (a != bi->GetItemMesh()
+				&& a != bi->GetRootComponent())
+			{
+				a->DestroyComponent();
+			}
+			
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::SetAllComponentsUseParentsBounds()
+{
+	for (TActorIterator<APlayerCharacter> It(GetWorld()); It; ++It)
+	{
+		APlayerCharacter* pc = *It;
+		TArray<USceneComponent*> ActorComponents;
+		pc->GetComponents(ActorComponents);
+		for (USceneComponent* a : ActorComponents)
+		{
+			a->bUseAttachParentBound = true;
+		}
+		
+	}
+
+	for (TActorIterator<ABaseItem> It(GetWorld()); It; ++It)
+	{
+		ABaseItem* bi = *It;
+		TArray<USceneComponent*> ActorComponents;
+		bi->GetComponents(ActorComponents);
+		for (USceneComponent* a : ActorComponents)
+		{
+			a->bUseAttachParentBound = true;			
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::RemoveHUD()
+{
+	UBpGameplayHelperLib::RemoveWidgetFromViewport("CharacterHUD");
+}
+
+void AReadyOrNotPlayerController::ShowHUD()
+{
+	const APlayerCharacter* PlayerCharacter = Cast<APlayerCharacter>(GetPawn());
+	if(PlayerCharacter && PlayerCharacter->HumanCharacterWidget_V2)
+	{
+		PlayerCharacter->HumanCharacterWidget_V2->ShowHUD();
+	}
+}
+
+void AReadyOrNotPlayerController::HideHUD()
+{
+	const APlayerCharacter* PlayerCharacter = Cast<APlayerCharacter>(GetPawn());
+	if(PlayerCharacter && PlayerCharacter->HumanCharacterWidget_V2)
+	{
+		PlayerCharacter->HumanCharacterWidget_V2->HideHUD();
+	}
+}
+
+void AReadyOrNotPlayerController::FreeVIP()
+{
+	AVIPEscortGM* gm = Cast<AVIPEscortGM>(GetWorld()->GetAuthGameMode());
+	if (gm)
+	{
+		if (gm->VIPPlayer)
+		{
+			APlayerCharacter* vip = Cast<APlayerCharacter>(gm->VIPPlayer->GetPawn());
+			if (vip)
+			{
+				vip->Server_FinishedUsingMultitool_Implementation(vip);
+			}
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::GibAllComponents()
+{
+#if UE_EDITOR
+	for (TActorIterator<ACyberneticCharacter>It(GetWorld()); It; ++It)
+	{
+		It->GetGibComponent()->Gib(EGibAreas::GA_RightLeg);
+		It->GetGibComponent()->Gib(EGibAreas::GA_LeftLeg);
+		It->GetGibComponent()->Gib(EGibAreas::GA_RightArm);
+		It->GetGibComponent()->Gib(EGibAreas::GA_LeftArm);
+		It->GetGibComponent()->Gib(EGibAreas::GA_Head);
+	}
+#endif
+}
+
+void AReadyOrNotPlayerController::TriggerInvalidateWidgets()
+{
+	FSlateApplication::Get().ToggleGlobalInvalidation(true);
+	//FSlateApplication::Get().InvalidateAllWidgets(false);
+}
+
+void AReadyOrNotPlayerController::Server_StartReferendum_Implementation(TSubclassOf<class AReferendum> ReferendumClass)
+{
+	BeginVote_Implementation("Mission Soft Complete", "End The Mission?", false);
+	BeginVote("Mission Soft Complete", "End The Mission?", false);
+
+	for (TActorIterator<APlayerController> It(GetWorld()); It; ++It)
+	{
+		if (AReadyOrNotPlayerController* Controller = Cast<AReadyOrNotPlayerController>(*It))
+		{
+			if (Controller != this)
+			{
+				Controller->BeginVote_Implementation("Mission Soft Complete", "End The Mission?", false);
+				Controller->BeginVote("Mission Soft Complete", "End The Mission?", false);
+			}
+		}
+	}
+}
+
+void AReadyOrNotPlayerController::Server_StartMapReferendum_Implementation(TSubclassOf<class AMapReferendum> ReferendumClass, const FString& MapURL)
+{
+	AReadyOrNotGameState* gs = GetWorld()->GetGameState<AReadyOrNotGameState>();
+	if (!gs)
+	{
+		return;
+	}
+
+	Server_StartReferendum_Implementation(ReferendumClass);
+
+	AMapReferendum* MapReferendum = Cast<AMapReferendum>(gs->CurrentReferendum);
+	if (!MapReferendum)
+	{
+		return;
+	}
+
+	MapReferendum->MapURL = MapURL;
+}
+
+void AReadyOrNotPlayerController::Server_StartPlayerReferendum_Implementation(TSubclassOf<class APlayerReferendum> ReferendumClass, class AReadyOrNotPlayerState* TargetPlayer)
+{
+	AReadyOrNotGameState* gs = GetWorld()->GetGameState<AReadyOrNotGameState>();
+	if (!gs)
+	{
+		return;
+	}
+
+	Server_StartReferendum_Implementation(ReferendumClass);
+
+	APlayerReferendum* PlayerReferendum = Cast<APlayerReferendum>(gs->CurrentReferendum);
+	if (!PlayerReferendum)
+	{
+		return;
+	}
+
+	PlayerReferendum->TargetPlayerState = TargetPlayer;
+}
+
+void AReadyOrNotPlayerController::Server_ReferendumVoteYes_Implementation()
+{
+	AReadyOrNotGameState* gs = GetWorld()->GetGameState<AReadyOrNotGameState>();
+	if (!gs)
+	{
+		return;
+	}
+
+	if (!gs->CurrentReferendum || !gs->CurrentReferendum->bReferendumRunning)
+	{
+		return; // there is no referendum running, we can't cast a vote for it
+	}
+
+	if (VoteAntiSpamDebouncerCurrent > 0.0f)
+	{
+		return; // no spamming votes allowed
+	}
+
+	VoteAntiSpamDebouncerCurrent = VoteAntiSpamDebouncer;
+	gs->CurrentReferendum->CastedYesVote(this);
+}
+
+void AReadyOrNotPlayerController::Server_ReferendumVoteNo_Implementation()
+{
+	AReadyOrNotGameState* gs = GetWorld()->GetGameState<AReadyOrNotGameState>();
+	if (!gs)
+	{
+		return;
+	}
+
+	if (!gs->CurrentReferendum || !gs->CurrentReferendum->bReferendumRunning)
+	{
+		return; // there is no referendum running, we can't cast a vote for it
+	}
+
+	if (VoteAntiSpamDebouncerCurrent > 0.0f)
+	{
+		return; // no spamming votes allowed
+	}
+
+	VoteAntiSpamDebouncerCurrent = VoteAntiSpamDebouncer;
+	gs->CurrentReferendum->CastedNoVote(this);
+}
+
+void AReadyOrNotPlayerController::Server_AddMarker_Implementation(const FPlanningMarker& Marker)
+{
+	if (!GetWorld())
+		return;
+
+	AReadyOrNotGameMode* GameMode = GetWorld()->GetAuthGameMode<AReadyOrNotGameMode>();
+	if (!GameMode)
+		return;
+	
+	AMissionPlanManager* MissionPlanManager = GameMode->MissionPlanManager;
+	if (!MissionPlanManager)
+		return;
+
+	FPlanningMarker& AddedMark = MissionPlanManager->MarkerArray.Items.Add_GetRef(Marker);
+	if (GetRoNPlayerState())
+		AddedMark.PlayerNumber = GetRoNPlayerState()->PlanningPlayerNumber;
+	
+	MissionPlanManager->MarkerArray.MarkItemDirty(AddedMark);
+	MissionPlanManager->MarkerArray.OnPlanningMarkerAdded.Broadcast(AddedMark);
+}
+
+void AReadyOrNotPlayerController::Server_RemoveMarker_Implementation(int32 ID)
+{
+	if (ID == INDEX_NONE)
+		return;
+	
+	if (!GetWorld())
+		return;
+
+	AReadyOrNotGameMode* GameMode = GetWorld()->GetAuthGameMode<AReadyOrNotGameMode>();
+	if (!GameMode)
+		return;
+	
+	AMissionPlanManager* MissionPlanManager = GameMode->MissionPlanManager;
+	if (!MissionPlanManager)
+		return;
+
+	AReadyOrNotPlayerState* ReadyOrNotPlayerState = GetRoNPlayerState();
+	if (!ReadyOrNotPlayerState)
+		return;
+	
+	int32 PlayerNumber = ReadyOrNotPlayerState->PlanningPlayerNumber;
+	int32 Removed = MissionPlanManager->MarkerArray.Items.RemoveAll([ID, PlayerNumber](const FPlanningMarker& Marker)
+	{
+		return Marker.ReplicationID == ID && Marker.PlayerNumber == PlayerNumber;
+	});
+
+	if (Removed > 0)
+	{
+		MissionPlanManager->MarkerArray.MarkArrayDirty();
+		MissionPlanManager->MarkerArray.OnPlanningMarkerRemoved.Broadcast(ID);
+	}
+}
+
+void AReadyOrNotPlayerController::Server_AddLine_Implementation(const FPlanningLine& Line)
+{
+	if (!GetWorld())
+		return;
+
+	AReadyOrNotGameMode* GameMode = GetWorld()->GetAuthGameMode<AReadyOrNotGameMode>();
+	if (!GameMode)
+		return;
+	
+	AMissionPlanManager* MissionPlanManager = GameMode->MissionPlanManager;
+	if (!MissionPlanManager)
+		return;
+	
+	FPlanningLine& AddedLine = MissionPlanManager->LineArray.Items.Add_GetRef(Line);
+	if (GetRoNPlayerState())
+		AddedLine.PlayerNumber = GetRoNPlayerState()->PlanningPlayerNumber;
+	
+	MissionPlanManager->LineArray.MarkItemDirty(AddedLine);
+	MissionPlanManager->LineArray.OnPlanningLineAdded.Broadcast(AddedLine);
+}
+
+void AReadyOrNotPlayerController::Server_RemoveLine_Implementation(int32 ID)
+{
+	if (ID == INDEX_NONE)
+		return;
+	
+	if (!GetWorld())
+		return;
+
+	AReadyOrNotGameMode* GameMode = GetWorld()->GetAuthGameMode<AReadyOrNotGameMode>();
+	if (!GameMode)
+		return;
+	
+	AMissionPlanManager* MissionPlanManager = GameMode->MissionPlanManager;
+	if (!MissionPlanManager)
+		return;
+
+	AReadyOrNotPlayerState* ReadyOrNotPlayerState = GetRoNPlayerState();
+	if (!ReadyOrNotPlayerState)
+		return;
+
+	int32 PlayerNumber = ReadyOrNotPlayerState->PlanningPlayerNumber;
+	int32 Removed = MissionPlanManager->LineArray.Items.RemoveAll([ID, PlayerNumber](const FPlanningLine& Line)
+	{
+		return Line.ReplicationID == ID && Line.PlayerNumber == PlayerNumber;
+	});
+
+	if (Removed > 0)
+	{
+		MissionPlanManager->LineArray.MarkArrayDirty();
+		MissionPlanManager->LineArray.OnPlanningLineRemoved.Broadcast(ID);
+	}
+}
+
+void AReadyOrNotPlayerController::OnLocallyFiredProjectile(ABulletProjectile* Projectile, int32 ProjectileIdentifier)
+{
+	if (!IsValid(Projectile))
+		return;
+
+	FProjectileData* ExistingData = ActiveProjectiles.Find(ProjectileIdentifier);
+	if(!ExistingData)
+	{
+		FProjectileData ProjectileData;
+		ProjectileData.Projectiles = { Projectile };
+
+		ActiveProjectiles.Emplace(ProjectileIdentifier, ProjectileData);
+	}
+	else
+	{
+		ExistingData->Projectiles.Emplace(Projectile);
+	}
+}
+
+void AReadyOrNotPlayerController::Client_OnProjectileValidation_Implementation(int32 ProjectileSeed, EServerValidationState Validation)
+{
+	if (!ActiveProjectiles.Find(ProjectileSeed))
+		return;
+	
+	TArray<ABulletProjectile*>& Projectiles = ActiveProjectiles[ProjectileSeed].Projectiles;
+	
+	switch(Validation)
+	{
+		case EServerValidationState::Invalid:
+			for (int32 i = 0; i < Projectiles.Num(); i++)
+			{
+				if (!IsValid(Projectiles[i]))
+					continue;
+				
+				Projectiles[i]->Destroy();			
+			}
+			ActiveProjectiles.Remove(ProjectileSeed);
+			break;
+		
+		case EServerValidationState::Validated:
+			for (int32 i = 0; i < Projectiles.Num(); i++)
+			{
+				if (!IsValid(Projectiles[i]))
+					continue;
+				
+				Projectiles[i]->OnProjectileValidated();				
+			}
+			ActiveProjectiles.Remove(ProjectileSeed);
+			break;
+		
+		case EServerValidationState::Unvalidated:
+		default:
+			break;	
+	}
+}
+
+void AReadyOrNotPlayerController::ReadyUp()
+{
+	AMissionPortal* MissionPortal = nullptr;
+	for (TActorIterator<AMissionPortal> It(GetWorld()); It; ++It)
+	{
+		MissionPortal = *It;
+		break;
+	}
+
+	// No use for ready up if there's no mission portal
+	if (!IsValid(MissionPortal))
+		return;
+
+	// Make sure that a mission has been selected before allowing ready up
+	if (MissionPortal->MissionURL.IsEmpty())
+		return;
+	
+	bIsReady = !bIsReady;
+
+	Server_SetReadyState(bIsReady);
+	
+	if (!HasAuthority())
+	{
+		// Run it locally and then again when server responds to update if it's wrong for whatever reason
+		Client_LocalReadyStateChanged(bIsReady);		
+	}
+}
+
+void AReadyOrNotPlayerController::ReadyUp_Failsafe()
+{
+	const FKey BoundReadyUpKey = UReadyOrNotFunctionLibrary::GetKeyFromInputActionName("ReadyUp");
+	if (!BoundReadyUpKey.IsValid())
+	{
+		ReadyUp();
+	}
+}
+
+void AReadyOrNotPlayerController::Server_SetReadyState_Implementation(bool bReady)
+{
+	bIsReady = bReady;
+	OnPlayerReadyChange.Broadcast(this, bIsReady);
+	Client_LocalReadyStateChanged(bIsReady);
+}
+
+void AReadyOrNotPlayerController::Client_LocalReadyStateChanged_Implementation(bool bReady)
+{
+	const APlayerCharacter* PlayerCharacter = Cast<APlayerCharacter>(GetPawn());
+	if (!PlayerCharacter || !IsValid(PlayerCharacter->HumanCharacterWidget_V2))
+		return;
+	
+	PlayerCharacter->HumanCharacterWidget_V2->LocalReadyStateChanged(bIsReady);
+}
+
+void AReadyOrNotPlayerController::Client_UpdateWorldTime_Implementation(float ServerTime, float SentClientTime)
+{
+	if (!GetWorld() || RoundTripTimeBuffer.Num() <= 0)
+		return;
+	
+	const float RoundTripTime = GetWorld()->GetTimeSeconds() - SentClientTime;
+	float AdjustedRoundTripTime = RoundTripTime;
+
+	RoundTripTimeBuffer[RoundTripTimeBufferIndex] = RoundTripTime;
+	RoundTripTimeBufferIndex++;
+
+	if (RoundTripTimeBufferIndex >= RoundTripTimeBuffer.Num())
+		RoundTripTimeBufferIndex = 0;
+	
+	if (!RoundTripTimeBuffer.Contains(-1.0f))
+	{
+		float ShortestTime = FLT_MAX;
+		float LongestTime = -FLT_MAX;
+
+		for (int32 i = 0; i < RoundTripTimeBuffer.Num() - 1; i++)
+		{
+			float Time = RoundTripTimeBuffer[i];
+			
+			if (Time > LongestTime)
+				LongestTime = Time;
+			
+			if (Time < ShortestTime)
+				ShortestTime = Time;
+		}
+
+		int32 Samples = 0;
+		for (int32 i = 0; i < RoundTripTimeBuffer.Num() - 1; i++)
+		{
+			float Time = RoundTripTimeBuffer[i];
+
+			if (Time <= ShortestTime)
+			{
+				ShortestTime = -FLT_MAX;
+				continue;
+			}
+			if (Time >= LongestTime)
+			{
+				LongestTime = FLT_MAX;
+				continue;
+			}
+			
+			AdjustedRoundTripTime += Time;
+			Samples++;
+		}
+
+		AdjustedRoundTripTime /= Samples;
+	}
+
+	ServerTimeDelta = ServerTime - SentClientTime - (AdjustedRoundTripTime / 2.0f);
+	if (FMath::Abs(ServerTimeDelta) > 10000.0f)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 0.0f, FColor::Red, TEXT("FRICK"));
+		return;
+	}
+}
+
+void AReadyOrNotPlayerController::Server_RequestWorldTime_Implementation(float ClientTime)
+{
+	if (!GetWorld())
+		return;
+
+	const float ServerTime = GetWorld()->GetTimeSeconds();
+	Client_UpdateWorldTime(ServerTime, ClientTime);
+}
+
+void AReadyOrNotPlayerController::PostNetInit()
+{
+	Super::PostNetInit();
+	
+	constexpr int32 RoundTripBufferSize = 10;
+	
+	RoundTripTimeBuffer.Init(-1.0f, RoundTripBufferSize);
+	RoundTripTimeBufferIndex = 0;
+
+	ServerTimeDelta = 0.0f;
+
+	if (GetLocalRole() != ROLE_Authority)
+	{
+		Server_RequestWorldTime(GetWorld()->GetTimeSeconds());
+
+		FTimerDelegate TimerDelegate = FTimerDelegate::CreateWeakLambda(this, [&]()
+		{
+			Server_RequestWorldTime(GetWorld()->GetTimeSeconds());
+		});
+		
+		FTimerHandle TimerHandle;
+		GetWorld()->GetTimerManager().SetTimer(TimerHandle, TimerDelegate, 1.0f, true);
+	}
+}
+
+float AReadyOrNotPlayerController::GetSynchronizedWorldTime() const
+{
+	if (!GetWorld())
+		return 0.0f;
+	
+	return GetWorld()->GetTimeSeconds() + ServerTimeDelta; 
+}
+
+void AReadyOrNotPlayerController::SetAimDownSightsAimAssist(bool Enable)
+{
+	SetActiveAimAssistConfig(GetAimAssistConfigByIntensity(AimAssistIntensity, Enable));
+}
+
+UUASAimAssistConfigDataAsset* AReadyOrNotPlayerController::GetAimAssistConfigByIntensity(
+	const FString& Intensity, bool bAds)
+{
+	if (bAds)
+	{
+		if (Intensity.Equals("high"))
+		{
+			return AimAssistConfigADS_High;
+		}
+		if (Intensity.Equals("medium"))
+		{
+			return AimAssistConfigADS_Medium;
+		}
+		if (Intensity.Equals("low"))
+		{
+			return AimAssistConfigADS_Low;
+		}
+		if (Intensity.Equals("off"))
+		{
+			return AimAssistConfigADS_Off;
+		}
+	}
+	else
+	{
+		if (Intensity.Equals("high"))
+		{
+			return AimAssistConfig_High;
+		}
+		if (Intensity.Equals("medium"))
+		{
+			return AimAssistConfig_Medium;
+		}
+		if (Intensity.Equals("low"))
+		{
+			return AimAssistConfig_Low;
+		}
+		if (Intensity.Equals("off"))
+		{
+			return AimAssistConfig_Off;
+		}
+	}
+	return nullptr;
+}
+
+void AReadyOrNotPlayerController::SetActiveAimAssistConfig(UUASAimAssistConfigDataAsset* NewAimAssistConfig)
+{
+	TArray<UUASAimAssistComponent*> AimAssistComponents;
+	GetComponents<UUASAimAssistComponent>(AimAssistComponents);
+	for (UUASAimAssistComponent* AimAssistComponent : AimAssistComponents)
+	{
+		AimAssistComponent->SetAimAssistDataAsset(NewAimAssistConfig);
+		AimAssistComponent->SetEnableStickiness(NewAimAssistConfig->EnableStickiness);
+		AimAssistComponent->SetEnableMagnetism(NewAimAssistConfig->EnableMagnetism);
+		AimAssistComponent->SetEnableZoneScaling(NewAimAssistConfig->EnableZoneScaling);
+		AimAssistComponent->SetEnableAutoAim(NewAimAssistConfig->EnableAutoAim);
+	}
+}
+
+void AReadyOrNotPlayerController::LoadAimAssistIntensity()
+{
+	FString NewAimAssistIntensity;
+	if (UBpGameplayHelperLib::GetGamepadAimAssistIntensity(NewAimAssistIntensity))
+	{
+		AimAssistIntensity = NewAimAssistIntensity;
+	}
+}

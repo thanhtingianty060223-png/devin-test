@@ -1,0 +1,90 @@
+// Copyright Void Interactive, 2023
+
+#include "ReadyOrNotPlayerCameraManager.h"
+
+#include "Info/RONCameraModifier_CameraShake.h"
+
+AReadyOrNotPlayerCameraManager::AReadyOrNotPlayerCameraManager()
+{
+	DefaultModifiers.Empty();
+	DefaultModifiers.Add(URONCameraModifier_CameraShake::StaticClass());
+}
+
+UCameraShakeBase* AReadyOrNotPlayerCameraManager::StartCameraShake2(UCameraShakeBase* Shake, float Scale, ECameraShakePlaySpace PlaySpace, FRotator UserPlaySpaceRot)
+{
+	if (URONCameraModifier_CameraShake* RONShakeMod = Cast<URONCameraModifier_CameraShake>(CachedCameraShakeMod))
+	{
+		if (Shake && Scale > 0.0f)
+		{
+			return RONShakeMod->AddCameraShake2(Shake, FAddCameraShakeParams(Scale, PlaySpace, UserPlaySpaceRot));
+		}
+	}
+
+	return nullptr;
+}
+
+void AReadyOrNotPlayerCameraManager::PostInitializeComponents()
+{
+	Super::PostInitializeComponents();
+
+ 	// Setup default camera modifiers
+	if (DefaultModifiers.Num() > 0)
+	{
+		for (auto ModifierClass : DefaultModifiers)
+		{
+			// empty entries are not valid here, do work only for actual classes
+			if (ModifierClass)
+			{
+				UCameraModifier* const NewMod = AddNewCameraModifier(ModifierClass);
+
+				// cache ref to camera shake if this is it
+				URONCameraModifier_CameraShake* const ShakeMod = Cast<URONCameraModifier_CameraShake>(NewMod);
+				if (ShakeMod)
+				{
+					CachedCameraShakeMod = ShakeMod;
+				}
+			}
+		}
+	}
+
+	// ##UE5.3UPGRADE##
+ 	// create CameraAnimInsts in pool
+	// for (int32 Idx=0; Idx<MAX_ACTIVE_CAMERA_ANIMS; ++Idx)
+	// {
+	// 	AnimInstPool[Idx] = NewObject<UCameraAnimInst>(this);
+
+	// 	// add everything to the free list initially
+	// 	FreeAnims.Add(AnimInstPool[Idx]);
+	// }
+	// ##UE5.3UPGRADE##
+
+	// spawn the temp CameraActor used for updating CameraAnims
+	FActorSpawnParameters SpawnInfo;
+	SpawnInfo.Owner = this;
+	SpawnInfo.Instigator = GetInstigator();
+	SpawnInfo.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	SpawnInfo.ObjectFlags |= RF_Transient;	// We never want to save these temp actors into a map
+	AnimCameraActor = GetWorld()->SpawnActor<ACameraActor>(SpawnInfo);
+}
+
+void AReadyOrNotPlayerCameraManager::PlayWorldCameraShake(UWorld* InWorld, class UCameraShakeBase* Shake, FVector Epicenter, float InnerRadius, float OuterRadius, float Falloff, bool bOrientShakeTowardsEpicenter )
+{
+	for( FConstPlayerControllerIterator Iterator = InWorld->GetPlayerControllerIterator(); Iterator; ++Iterator )
+	{
+		AReadyOrNotPlayerController* PlayerController = Cast<AReadyOrNotPlayerController>(Iterator->Get());
+		if (PlayerController && PlayerController->PlayerCameraManager != NULL)
+		{
+			float ShakeScale = CalcRadialShakeScale(PlayerController->PlayerCameraManager, Epicenter, InnerRadius, OuterRadius, Falloff);
+
+			if (bOrientShakeTowardsEpicenter && PlayerController->GetPawn() != NULL)
+			{
+				const FVector CamLoc = PlayerController->PlayerCameraManager->GetCameraLocation();
+				PlayerController->ClientStartCameraShake2(Shake, ShakeScale, ECameraShakePlaySpace::UserDefined, (Epicenter - CamLoc).Rotation());
+			}
+			else
+			{
+				PlayerController->ClientStartCameraShake2(Shake, ShakeScale);
+			}
+		}
+	}
+}

@@ -1,0 +1,715 @@
+﻿// Copyright Void Interactive, 2022
+
+#include "ModioManager.h"
+
+#include "IPlatformFilePak.h"
+#include "lib/GameFeatureLibrary.h"
+#if defined(WITH_MODIO)
+#include "Libraries/ModioCommonTypesLibrary.h"
+#include "ModioSubsystem.h"
+#include "Libraries/ModioSDKLibrary.h"
+//#include "Libraries/ModioInstallationOverride.h"
+#include "GenericPlatform/GenericPlatformMisc.h"
+#include "Types/ModioCommonTypes.h"
+#endif
+
+#if defined(WITH_MODIO)
+FModioManagerInitialized UModioManager::InitializedEvent;
+FModioModEvent UModioManager::ModInstalledEvent;
+FModioModEvent UModioManager::ModUninstalledEvent;
+FModioModEvent UModioManager::ModStateUpdatedEvent;
+#endif
+
+bool UModioManager::IsPackagedBuild()
+{
+#if WITH_EDITOR
+	return false;
+#endif
+	
+	ULocalPlayer* LocalPlayer = GEngine->FindFirstLocalPlayerFromControllerId(0);
+
+	if (!LocalPlayer)
+	{
+		return true;
+	}
+
+	UWorld *World = LocalPlayer->GetWorld();
+
+	if (World)
+	{
+		if (World->GetNetMode() == ENetMode::NM_DedicatedServer)
+		{
+			return true;
+		}
+
+		if (World->WorldType == EWorldType::Editor ||
+			World->WorldType == EWorldType::EditorPreview ||
+			World->WorldType == EWorldType::PIE)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+void UModioManager::Tick(float DeltaTime)
+{
+#if defined(WITH_MODIO)
+	// Modio needs to process events in the background during and after initialization, hence bShouldTick
+	if (!GetWorld())
+		return;
+	
+	FString MapName = GetWorld()->GetMapName();
+#if WITH_EDITOR
+	MapName.RemoveFromStart(GetWorld()->StreamingLevelsPrefix);
+#endif
+	
+	if (MapName != MAP_MAINMENU)
+		return;
+		
+	if (bShouldTick && ModioSubsystem)
+	{
+		TOptional<FModioModProgressInfo> ModProgressInfo = ModioSubsystem->QueryCurrentModUpdate();
+
+		// If we are installing a mod, allow the SDK to update much more rapidly to speed up download/extraction
+		int32 MaxUpdates = ModProgressInfo.IsSet() ? 65535 : 1;
+		double Start = FPlatformTime::Seconds();
+
+		int32 i = 0;
+		for (i = 0; i < MaxUpdates; i++)
+		{
+			ModioSubsystem->RunPendingHandlers();
+			double Elapsed = FPlatformTime::Seconds() - Start;
+			
+			// Cap the max time we're allowed to repeatedely update the SDK
+			if (Elapsed >= 1.0 / 60.0)
+				break;
+		}
+	}
+	else if(ModioSubsystem)
+	{
+		// We still need to tick sometimes, even if not updating
+		ModioSubsystem->RunPendingHandlers();
+	}
+#endif
+}
+
+UModioManager* UModioManager::GetInstance()
+{
+	const UReadyOrNotGameInstance* GameInstance = UReadyOrNotStatics::GetReadyOrNotGameInstance();
+	if (!GameInstance)
+		return nullptr;
+
+	return GameInstance->ModioManager;
+}
+
+void UModioManager::ClearUserData()
+{
+#if defined(WITH_MODIO)
+	if (!ModioSubsystem)
+		return;
+
+	// Unmount all mods first as we need to delete all the files
+	const TMap<FModioModID, FModioModCollectionEntry>& InstalledMods = ModioSubsystem->QueryUserSubscriptions();
+	for (const auto Pair : InstalledMods)
+	{
+		// If at least one mod, tell the user they need to restart
+		SetRestartRequired();
+		UnmountMod(Pair.Key);
+	}
+	
+	ModioSubsystem->ClearUserDataAsync(FOnErrorOnlyDelegateFast::CreateUObject(this, &UModioManager::HandleUserDataCleared));
+#endif
+}
+
+bool UModioManager::IsRestartRequired() const
+{
+#if defined(WITH_MODIO)
+		return bRestartRequired || ModsPendingRestart.Num() > 0;
+#else
+	return false;
+#endif
+}
+
+bool UModioManager::IsModIoEnabled()
+{
+#if defined(MODIO_ENABLED) && defined(WITH_MODIO)
+	return UGameFeatureLibrary::IsFeatureEnabled(EGameFeature::GF_ModSupport);
+#else
+	return false;
+#endif
+}
+
+bool UModioManager::IsModUpdating()
+{
+#if defined(WITH_MODIO)
+	if(ModsCurrentlyUpdating.Num() > 0 || ModsCurrentlyInstalling.Num() > 0)
+	{
+		return true;
+	}
+#endif
+	return false;
+}
+
+FString UModioManager::GetModInstallDirectory()
+{
+	return FPaths::ProjectContentDir() + TEXT("Paks/");
+}
+
+FString UModioManager::GetModIODirectory()
+{
+	return FPaths::ConvertRelativePathToFull(GetModInstallDirectory()) + "mod.io";
+}
+
+FString UModioManager::GetPakIniPath()
+{
+	// This matches IPlatformFilePak.cpp, in the engine and is used to disable / enable mods - or define safe mode paks
+	const FString PakIni = FPaths::GeneratedConfigDir() + FPlatformProperties::PlatformName() + TEXT("/Paks.ini");
+	return PakIni;
+}
+
+void UModioManager::Initialize(UReadyOrNotGameInstance* GameInstance)
+{
+#if defined(MODIO_ENABLED) && defined(WITH_MODIO)
+	if(bInitialized && ModioSubsystem)
+		return;
+	ModioSubsystem = GEngine->GetEngineSubsystem<UModioSubsystem>();
+
+	if (!ModioSubsystem)
+		return;
+
+	if(GameInstance)
+		PakPlatformFile = GameInstance->GetPakPlatform();
+	
+	
+	if (bInitialized)
+		return;
+
+	ModioSubsystem->SetLogLevel(EModioLogLevel::Trace);
+	
+	bShouldTick = true;
+	bool bModioLive = false;
+#ifdef MODIO_LIVE
+	bModioLive = true;
+#endif
+	FModioInitializeOptions InitializeOptions;
+	InitializeOptions.GameId = FModioGameID(MOD_IO_GAME_ID);
+	InitializeOptions.ApiKey = FModioApiKey(MOD_IO_API_KEY);
+	InitializeOptions.GameEnvironment = bModioLive ? EModioEnvironment::Live : EModioEnvironment::Test;
+	InitializeOptions.PortalInUse = EModioPortal::Steam;
+
+// #if defined(MODIO_OVERIDE_INSTALL_DIRECTORY)
+// 	InitializeOptions.LocalSessionIdentifier = UKismetSystemLibrary::GetDeviceId() + UKismetSystemLibrary::GetPlatformUserName();
+// 	const FString MountDirectory = GetModIODirectory();
+// 	UModioInstallationOverride::OverrideModInstallationDirectory(MountDirectory, InitializeOptions);
+// #endif
+	LoadMountedPakInfo();
+	LoadModState();
+	ModioSubsystem->InitializeAsync(InitializeOptions, FOnErrorOnlyDelegateFast::CreateUObject(this, &UModioManager::HandleModioInitialized));
+	
+	bInitialized = true;
+	ModioSubsystem->SetLogLevel(EModioLogLevel::Trace);
+#endif
+}
+
+void UModioManager::Shutdown(bool bRestart)
+{
+#if defined(WITH_MODIO)
+	if (!ModioSubsystem)
+		return;
+
+	if (!bInitialized)
+		return;
+
+	SaveModState();
+	SavePakIni();
+	ModioSubsystem->DisableModManagement();
+	ModioSubsystem->ShutdownAsync(FOnErrorOnlyDelegateFast::CreateUObject(this, &UModioManager::HandleModioShutdown, bRestart));
+#endif
+}
+
+#if defined(WITH_MODIO)
+void UModioManager::MountInstalledMods()
+{
+#ifndef MODIO_ENABLED
+	return;
+#else
+	if (!ModioSubsystem)
+		return;
+	
+	UE_LOG(LogReadyOrNotModding, Log, TEXT("Mounting modio mod paks"));
+	const TMap<FModioModID, FModioModCollectionEntry>& InstalledMods = ModioSubsystem->QueryUserSubscriptions();
+	for (const auto Pair : InstalledMods)
+	{
+		const EModStatus Status = GetModStatus(Pair.Key);
+		UE_LOG(LogReadyOrNotModding, Log, TEXT("Mod %s Status is: %s"), *Pair.Key.ToString(), *UEnum::GetValueAsString(Status));
+		InternalMountMod(Pair.Key, InstalledMods);
+	}
+	UE_LOG(LogReadyOrNotModding, Log, TEXT("Successfully mounted modio mod paks"), );
+#endif
+}
+
+bool UModioManager::MountSingleMod(const FModioModID InModId)
+{
+	if(!ModioSubsystem)
+		return false;
+#ifdef MODIO_ENABLED
+	const TMap<FModioModID, FModioModCollectionEntry>& InstalledMods = ModioSubsystem->QueryUserSubscriptions();
+	if(!InstalledMods.Contains(InModId))
+	{
+		UE_LOG(LogReadyOrNotModding, Log, TEXT("Failed to find a mod with Mod ID of %s"), *InModId.ToString());
+		return false;
+	}
+	InternalMountMod(InModId, InstalledMods);
+#endif
+	return true;
+}
+
+void UModioManager::UnmountMod(const FModioModID InModId)
+{
+#ifdef MODIO_ENABLED
+	const TMap<FModioModID, FModioModCollectionEntry>& InstalledMods = ModioSubsystem->QueryUserSubscriptions();
+	if(!InstalledMods.Contains(InModId))
+	{
+		UE_LOG(LogReadyOrNotModding, Log, TEXT("Failed to find a mod with Mod ID of %s"), *InModId.ToString());
+		return;
+	}
+
+	UE_LOG(LogReadyOrNotModding, Log, TEXT("Unmmounting Mod with ID: %s,"), *InModId.ToString());
+	FModioModCollectionEntry ModioModCollectionEntry = InstalledMods[InModId];
+	FString ModDirectory = ModioModCollectionEntry.GetPath();
+
+	TArray<FString> PakFiles;
+	GetPaksForModioMod(InModId, PakFiles);
+	for (const FString& FileName : PakFiles)
+	{
+		if(!IsPackagedBuild())
+			continue;
+
+		if (PakPlatformFile ) {
+			FString ModFullFilePath = FPaths::Combine(ModDirectory, FileName);
+
+			// Try to find the pak file
+			for (int32 i = 0; i < MountedPaks.Num(); i++)
+			{
+				// Mods in Pakamanger are stored as relative paths, but modio returns full paths - which means the unmount wont work if we use the modio paths
+				if(FPaths::IsSamePath(*MountedPaks[i], ModFullFilePath))
+				{
+					if(PakPlatformFile->Unmount(*MountedPaks[i]))
+					{
+						UE_LOG(LogReadyOrNotModding, Log, TEXT("Ummounted Pak File %s for ModID %s"), *ModFullFilePath, *InModId.ToString());
+						LoadMountedPakInfo();
+					}
+					else
+					{
+						UE_LOG(LogReadyOrNotModding, Warning, TEXT("Failed to unmount Pak %s"), *ModFullFilePath);
+					}
+					break;
+				}
+			}
+			
+		}
+	}
+
+	UE_LOG(LogReadyOrNotModding, Log, TEXT("Completed unmmounting Mod with ID: %s,"), *InModId.ToString());
+#endif // ifdef MODIO_ENABLED
+}
+
+void UModioManager::DisableMod(const FModioModID InModId)
+{
+	if(ModsActiveOnStartup.Contains(InModId))
+		ModsPendingRestart.Add(InModId);
+	else
+		ModsPendingRestart.Remove(InModId);
+	
+	ModsDisabled.Add(InModId);
+	ModStateUpdatedEvent.Broadcast(InModId);
+}
+
+void UModioManager::EnableMod(const FModioModID InModId)
+{
+	if(ModsActiveOnStartup.Contains(InModId))
+		ModsPendingRestart.Remove(InModId);
+	else
+		ModsPendingRestart.Add(InModId);
+		
+	ModsDisabled.Remove(InModId);
+	ModStateUpdatedEvent.Broadcast(InModId);
+}
+
+bool UModioManager::IsModEnabled(const FModioModID InModId) const
+{
+	const TMap<FModioModID, FModioModCollectionEntry>& InstalledMods = ModioSubsystem->QueryUserSubscriptions();
+	const FModioModCollectionEntry* ModInfo = InstalledMods.Find(InModId);
+	if(!ModInfo)
+		return false;
+	return !ModsDisabled.Contains(InModId);
+}
+
+EModStatus UModioManager::GetModStatus(const FModioModID InModId)
+{
+	// Unsubscribed, // Not installed, or disabled, ready to be installed if needed
+	// Installing,
+	// InstalledPendingRestart, // When the mod is installed, but not active
+	// InstalledAndActive, // When the mod is installed and active
+	// Disabled,
+	// Uninstalling,
+	// Error
+
+	
+	
+	if(ModsWithErrors.Contains(InModId))
+		return EModStatus::Error;
+
+#if defined(ENABLE_SAFE_PAK_MODE)
+	if(PakPlatformFile && PakPlatformFile->IsRunningInSafeMode())
+		return EModStatus::Disabled;
+#endif
+	
+	const TMap<FModioModID, FModioModCollectionEntry>& InstalledMods = ModioSubsystem->QueryUserSubscriptions();
+	const FModioModCollectionEntry* ModInfo = InstalledMods.Find(InModId);
+	if(!ModInfo)
+	{
+		return EModStatus::Unsubscribed;
+	}
+	const EModioModState ModState = ModInfo->GetModState();
+	if(ModState == EModioModState::InstallationPending
+		|| ModState == EModioModState::Downloading
+		|| ModState == EModioModState::Extracting)
+	{
+		return EModStatus::Installing;
+	}
+	
+	if(ModState == EModioModState::UpdatePending)
+	{
+		return EModStatus::Updating;
+	}
+
+	if(ModState == EModioModState::UninstallPending)
+	{
+		return EModStatus::Uninstalling;
+	}
+		
+	// We must be installed, are we active or pending restart or disabled? 
+	if(ModsDisabled.Contains(InModId))
+		return EModStatus::Disabled;
+
+	TArray<FString> ModPakFiles;
+	GetPaksForModioMod(InModId, ModPakFiles);
+
+	bool bAllMounted = true;
+	for(auto ModPakFilename : ModPakFiles)
+	{
+		bool bFound = false;
+		for(auto MountedPakFile : MountedPaks)
+		{
+			FString ModFullFilePath = FPaths::Combine(ModInfo->GetPath(), ModPakFilename);
+			if(FPaths::IsSamePath(ModFullFilePath, MountedPakFile))
+			{
+				bFound = true;
+				break;
+			}
+		}
+		if(!bFound)
+		{
+			bAllMounted = false;
+			break;
+		}
+	}
+	if(bAllMounted)
+		return EModStatus::Installed;
+	return EModStatus::Disabled; // who knows?
+}
+
+bool UModioManager::IsModPendingRestart(const FModioModID InModId)
+{
+	return ModsPendingRestart.Contains(InModId);
+}
+
+#endif // defined(WITH_MODIO)
+
+#if defined(WITH_MODIO)
+
+void UModioManager::GetPaksForModioMod(const FModioModID InModId, TArray<FString>& OutPakFiles)
+{
+	const TMap<FModioModID, FModioModCollectionEntry>& InstalledMods = ModioSubsystem->QueryUserSubscriptions();
+	if(!InstalledMods.Contains(InModId))
+		return;
+	
+	FModioModCollectionEntry ModioModCollectionEntry = InstalledMods[InModId];
+	const FString ModDirectory = ModioModCollectionEntry.GetPath();
+	const FString Search = ModDirectory + "/*.pak";
+	IFileManager::Get().FindFiles(OutPakFiles, *Search, true, false);
+}
+
+void UModioManager::InternalMountMod(const FModioModID InModId,	const TMap<FModioModID, FModioModCollectionEntry>& InstalledMods)
+{
+	if(!IsPackagedBuild())
+		return;
+	
+	FModioModCollectionEntry ModioModCollectionEntry = InstalledMods[InModId];
+	FString ModDirectory = ModioModCollectionEntry.GetPath();
+	UE_LOG(LogReadyOrNotModding, Log, TEXT("Mounting Mod with ID: %s, from Directory %s"), *InModId.ToString(), *ModDirectory);
+	TArray<FString> PakFiles;
+	GetPaksForModioMod(InModId, PakFiles);
+	for (const FString& FileName : PakFiles)
+	{
+		//DisabledMods.Remove(FileName);
+		if(!UReadyOrNotGameInstance::bIsModded)
+		{
+#if defined(ENABLE_SAFE_PAK_MODE)
+			if(PakPlatformFile)
+			{
+				if(PakPlatformFile->CanMountPakFile(FileName))
+				{
+					UReadyOrNotGameInstance::bIsModded = true;
+				}
+			}
+			
+#else
+			UReadyOrNotGameInstance::bIsModded = true;
+#endif
+		}
+	}
+
+	// Check for worldgen save files
+	const FString SavSearch = ModDirectory + "/" + UBpGameplayHelperLib::GetProjectVersion() + "_worldgen_*.sav";
+	TArray<FString> SavFiles;
+	IFileManager::Get().FindFiles(SavFiles, *SavSearch, true, false);
+	for (const FString& FileName : SavFiles)
+	{
+		// We have a worldgen file, copy if it doesn't exist
+		const FString SourcePath = ModDirectory + "/" + FileName;
+		const FString SaveFilepath = FPaths::ProjectSavedDir() + "SaveGames/" + FileName;
+		if(!FPaths::FileExists(SaveFilepath))
+		{
+			UE_LOG(LogReadyOrNotModding, Log, TEXT("Copying World Gen Data from %s to %s"), *SourcePath, *SaveFilepath);
+			IFileManager::Get().Copy(*SaveFilepath, *SourcePath);
+		}
+	}
+	
+	UE_LOG(LogReadyOrNotModding, Log, TEXT("Completed Mounting Mod with ID: %s, from Directory %s"), *InModId.ToString(), *ModDirectory);
+}
+
+void UModioManager::HandleModioInitialized(FModioErrorCode ErrorCode)
+{
+	if (ErrorCode)
+	{		
+		UE_LOG(LogReadyOrNotModding, Error, TEXT("Modio subsystem initialization error (%s)"), *ErrorCode.GetErrorMessage());
+		InitializedEvent.Broadcast(ErrorCode.GetErrorMessage());
+	}
+	
+	bInitialized = true;
+	InitializedEvent.Broadcast(TOptional<FString>());
+
+
+	const TMap<FModioModID, FModioModCollectionEntry>& InstalledMods = ModioSubsystem->QueryUserSubscriptions();
+	for (const auto Pair : InstalledMods)
+	{
+		const EModStatus Status = GetModStatus(Pair.Key);
+		if(Status == EModStatus::Installed)
+		{
+			ModsActiveOnStartup.Add(Pair.Key);
+		}
+	}
+	
+	ErrorCode = ModioSubsystem->EnableModManagement(FOnModManagementDelegateFast::CreateUObject(this, &UModioManager::HandleModManagementEvent));
+	if (ErrorCode)
+	{
+		UE_LOG(LogReadyOrNotModding, Error, TEXT("Modio mod management error (%s)"), *ErrorCode.GetErrorMessage());
+	}
+
+	MountInstalledMods();
+}
+
+void UModioManager::HandleModioShutdown(FModioErrorCode ErrorCode, bool bRestart)
+{
+	UE_LOG(LogReadyOrNotModding, Log, TEXT("Modio subsystem shut down"));
+	bShouldTick = false;
+	bInitialized = false;
+	
+	if (bRestart)
+	{
+		UReadyOrNotGameInstance* GameInstance = UReadyOrNotStatics::GetReadyOrNotGameInstance();
+		Initialize(GameInstance);
+	}
+}
+
+void UModioManager::HandleUserDataCleared(FModioErrorCode ErrorCode)
+{
+	UE_LOG(LogReadyOrNotModding, Log, TEXT("Modio user data was cleared"));
+	Shutdown(true);
+
+	const FString ModIoDirectory = GetModIODirectory();
+	IPlatformFile& FileManager = FPlatformFileManager::Get().GetPlatformFile();
+	if(FileManager.DeleteDirectoryRecursively(*ModIoDirectory))
+	{
+		UE_LOG(LogReadyOrNotModding, Log, TEXT("Modio data cleaned up from %s"), *ModIoDirectory);
+	}
+	else
+	{
+		UE_LOG(LogReadyOrNotModding, Warning, TEXT("Old modio data failed to be cleaned up from %s"), *ModIoDirectory);
+	}
+}
+
+void UModioManager::HandleModManagementEvent(FModioModManagementEvent Event)
+{
+	UE_LOG(LogReadyOrNotModding, Warning, TEXT("Mod IO Failed Event for Mod %s. Type: %i Status %i"), *Event.ID.ToString(), Event.Event, Event.Status.GetValue());
+	if(Event.Status.GetValue() == 0)
+	{
+		if (Event.Event == EModioModManagementEventType::Installed ||
+			Event.Event == EModioModManagementEventType::Updated)
+		{
+			ModsPendingRestart.Add(Event.ID);
+			ModsActiveOnStartup.Remove(Event.ID); // we must have a new version, need to restart
+			MountSingleMod(Event.ID);
+			ModsWithErrors.Remove(Event.ID);
+			
+			ModInstalledEvent.Broadcast(Event.ID);
+
+			if (Event.Event == EModioModManagementEventType::Installed)
+			{
+				ModsCurrentlyInstalling.Remove(Event.ID);
+			}
+			else if (Event.Event == EModioModManagementEventType::Updated)
+			{
+				ModsCurrentlyUpdating.Remove(Event.ID); 
+			}
+			
+		}
+		else if(Event.Event == EModioModManagementEventType::Uninstalled)
+		{
+			if(ModsActiveOnStartup.Contains(Event.ID))
+				ModsPendingRestart.Add(Event.ID);
+			ModsActiveOnStartup.Remove(Event.ID);
+			
+			UnmountMod(Event.ID);
+			ModsWithErrors.Remove(Event.ID);
+			ModUninstalledEvent.Broadcast(Event.ID);
+		}
+		else if(Event.Event == EModioModManagementEventType::BeginInstall)
+		{
+			// We need to unmount the pak if it's mounted to update it, as it's in use by unreal 
+			UnmountMod(Event.ID);
+			ModsCurrentlyInstalling.Add(Event.ID);
+		}
+		else if(Event.Event == EModioModManagementEventType::BeginUpdate)
+		{
+			// We need to unmount the pak if it's mounted to update it, as it's in use by unreal 
+			UnmountMod(Event.ID);
+			ModsCurrentlyUpdating.Add(Event.ID); 
+		}
+
+		ModStateUpdatedEvent.Broadcast(Event.ID);
+
+#if !UE_BUILD_SHIPPING
+		FString EventType = TEXT("Unknown");
+		FString EventState = Event.Status ? TEXT("failed") : TEXT("succeeded");
+		FColor EventColor = Event.Status ? FColor::Red : FColor::Green;
+	
+		switch (Event.Event)
+		{
+		case EModioModManagementEventType::Installed:
+			EventType = TEXT("installation");
+			EventColor = FColor::Green;
+			break;
+		case EModioModManagementEventType::Uninstalled:
+			EventType = TEXT("uninstallation");
+			EventColor = FColor::Green;
+			break;
+		case EModioModManagementEventType::Updated:
+			EventType = TEXT("update");
+			break;
+		case EModioModManagementEventType::Uploaded:
+			EventType = TEXT("upload");
+			break;
+		}
+
+		FString DebugText = FString::Printf(TEXT("Modio mod %s %s %s"), *Event.ID.ToString(), *EventType, *EventState);
+		GEngine->AddOnScreenDebugMessage(-1, 5.0f, EventColor, DebugText);
+#endif
+	}
+	else
+	{
+		ModsWithErrors.Add(Event.ID);
+#if !UE_BUILD_SHIPPING
+		UE_LOG(LogReadyOrNotModding, Warning, TEXT("Mod IO Failed Event for Mod %s. Type: %i Status %i"), *Event.ID.ToString(), Event.Event, Event.Status.GetValue());
+		
+		FString DebugText = FString::Printf(TEXT("Modio mod %s failed due to an error: '%s' - not updating this time"), *Event.ID.ToString(), *Event.Status.GetErrorMessage());
+		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Red, DebugText);
+#endif
+	}
+}
+
+void UModioManager::LoadMountedPakInfo()
+{
+	if (PakPlatformFile )
+	{
+		PakPlatformFile->GetMountedPakFilenames(MountedPaks);
+	}
+}
+
+void UModioManager::SaveModState()
+{
+	UReadyOrNotModData* ModData = UReadyOrNotModData::Get();
+	if(ModData)
+	{
+		ModData->DisabledMods.Empty();
+		for(FModioModID ModId : ModsDisabled)
+		{
+			ModData->DisabledMods.Add(UModioCommonTypesLibrary::GetRawValueFromModID(ModId));
+		}
+
+		ModData->ErroredMods.Empty();
+		for(FModioModID ModId : ModsWithErrors)
+		{
+			ModData->ErroredMods.Add(UModioCommonTypesLibrary::GetRawValueFromModID(ModId));
+		}
+		UGameplayStatics::SaveGameToSlot(ModData, ModData->SaveSlotName, ModData->UserIndex);
+		UE_LOG(LogReadyOrNotModding, Log, TEXT("Successfully saved metadata on mods, %i Disabled and %i in an error state"), ModsDisabled.Num(), ModsWithErrors.Num());
+	}
+}
+
+void UModioManager::LoadModState()
+{
+	UReadyOrNotModData* ModData = UReadyOrNotModData::Get();
+	if(ModData)
+	{
+		ModsDisabled.Empty();
+		for(const long long ModId : ModData->DisabledMods)
+		{
+			ModsDisabled.Add(FModioModID(ModId));
+		}
+
+		ModsWithErrors.Empty();
+		for(const long long ModId : ModData->ErroredMods)
+		{
+			ModsWithErrors.Add(FModioModID(ModId));
+		}
+	}
+}
+
+void UModioManager::SavePakIni()
+{
+#if defined(ENABLE_SAFE_PAK_MODE)
+	FConfigCacheIni* Config = new FConfigCacheIni(EConfigCacheType::DiskBacked);
+	TArray<FString> DisabledPakFilenames;
+	
+	for(const FModioModID ModId : ModsDisabled)
+	{
+		TArray<FString> PakFiles;
+		GetPaksForModioMod(ModId, PakFiles);
+		for(auto Pak : PakFiles)
+		{
+			const FString Filename = FPaths::GetCleanFilename(Pak);
+			DisabledPakFilenames.Add(Filename);
+		}
+	}
+	
+	Config->SetArray(TEXT("PakFiles"), TEXT("DisabledPakFiles"), DisabledPakFilenames, GetPakIniPath());
+	Config->Flush(false, GetPakIniPath());
+#endif
+}
+
+#endif // defined(WITH_MODIO)

@@ -1,0 +1,11693 @@
+// Copyright Void Interactive, 2024
+
+#include "PlayerCharacter.h"
+
+#include "ReadyOrNot.h"
+#include "ReadyOrNotGameMode.h"
+
+#include "Net/UnrealNetwork.h"
+
+#include "Animation/AnimInstance.h"
+#include "Animation/ReadyOrNotAnimInstance.h"
+
+#include "DamageTypes/BleedDamageType.h"
+#include "DamageTypes/BulletDamageType.h"
+#include "DamageTypes/StunDamage.h"
+
+#include "Audio/RoNSoundData.h"
+
+#include "Perception/AISense_Touch.h"
+
+#include "AI/SWATCharacter.h"
+#include "AI/SuspectCharacter.h"
+
+#include "Navigation/CrowdManager.h"
+#include "NavigationSystem/Public/NavigationSystem.h"
+#include "NavigationSystem/Public/NavigationPath.h"
+
+#include "Components/ReadyOrNotCharMovementComp.h"
+#include "Components/PlayerPostProcessing.h"
+#include "Components/CharacterHealthComponent.h"
+#include "Components/ArmourResourceComponent.h"
+#include "Components/FMODAudioPropagationComponent.h"
+#include "Components/InteractableComponent.h"
+#include "Components/MapActorComponent.h"
+#include "Components/ObjectiveMarkerComponent.h"
+#include "Components/BleedComponent.h"
+
+#include "GameModes/CoopGS.h"
+
+#include "GameplayEffects/BasePlayerEffect.h"
+
+#include "Actors/BaseItem.h"
+#include "Actors/BaseWeapon.h"
+#include "Actors/BaseMagazineWeapon.h"
+#include "Actors/Door.h"
+#include "Actors/PickupActor.h"
+#include "Actors/BaseGrenade.h"
+#include "Actors/LadderSnapZone.h"
+#include "Actors/PickupMagazineActor.h"
+#include "Actors/BloodPool.h"
+#include "Actors/PlayerViewActor.h"
+#include "Actors/PingActor.h"
+
+#include "Actors/Items/Tablet.h"
+#include "Actors/Items/NightvisionGoggles.h"
+#include "Actors/Items/Multitool.h"
+#include "Actors/Items/BallisticsShield.h"
+#include "Actors/Items/TelescopicLadder.h"
+#include "Actors/Items/Chemlight.h"
+#include "Actors/Items/Quadrotor.h"
+#include "Actors/Items/Zipcuffs.h"
+#include "Actors/Items/Shotgun.h"
+#include "Actors/Items/DoorJam.h"
+#include "Actors/Items/C2Explosive.h"
+
+#include "Actors/Gameplay/PlacedC2Explosive.h"
+#include "Actors/Gameplay/EvidenceActor.h"
+#include "Actors/Gameplay/ReadyOrNotPlayerState.h"
+#include "Actors/Gameplay/VisibilityBlockingVolume.h"
+
+#include "Actors/Attachments/ScopedWeaponAttachment.h"
+#include "Actors/Attachments/LaserAttachment.h"
+#include "Actors/Attachments/LightAttachment.h"
+
+#include "Actors/Triggers/ShotDetectionVolume.h"
+
+#include "Actors/Projectiles/DamageProjectiles/BulletProjectile.h"
+
+#include "Characters/ReadyOrNotPlayerController.h"
+#include "Characters/CyberneticCharacter.h"
+#include "Characters/CyberneticController.h"
+
+#include "Data/ItemData.h"
+
+#include "HUD/Widgets/HumanCharacterHUD_V2.h"
+#include "HUD/Widgets/SwatCommandWidget.h"
+
+#include "lib/BpGameplayHelperLib.h"
+#include "lib/ReadyOrNotFunctionLibrary.h"
+#include "Blueprint/WidgetBlueprintLibrary.h"
+
+#include "FMODBlueprintStatics.h"
+#include "ReadyOrNotAIConfig.h"
+
+#include "Subsystems/InGameLogSubsystem.h"
+#include "ReadyOrNotDebugSubsystem.h"
+
+#include "SkeletalMeshMerge.h"
+#include "Actors/PairedInteractionDriver.h"
+#include "Actors/Environment/ReadyOrNotAudioVolume.h"
+#include "Actors/Environment/ReadyOrNotTriggerVolume.h"
+#include "Actors/Items/LockpickGun.h"
+#include "Actors/Items/MeleeWeapon.h"
+#include "Actors/Items/Pepperspray.h"
+#include "GameModes/DefusalGS.h"
+#include "HUD/Widgets/TeamViewWidget.h"
+#include "HUD/Widgets/Console/CommandWheel.h"
+#include "HUD/Widgets/Console/ItemWheel.h"
+#include "Kismet/KismetMaterialLibrary.h"
+
+#include "Info/ScoringManager.h"
+#include "Info/SWATManager.h"
+
+#include "Perception/AISense_Damage.h"
+#include "Perception/AISense_Hearing.h"
+#include "Perception/AISense_Sight.h"
+
+#if !UE_BUILD_SHIPPING
+#include "Log.h"
+// ##UE5UPGRADE## Fix
+// #include "DevMenuFunctionLibrary.h"
+#endif
+
+#include "ReadyOrNotAISystem.h"
+#include "UASAimAssistComponent.h"
+#include "Actors/Environment/ActivityTriggerVolume.h"
+#include "Actors/Environment/ForceLowReadyVolume.h"
+#include "AI/TrailerSWATCharacter.h"
+#include "HUD/Widgets/TabletWidget.h"
+
+#include "Info/Activities/MoveToActivity.h"
+#include "Info/Activities/Team/TeamStackUpActivity.h"
+#include "Info/Activities/Team/TeamBreachAndClearActivity.h"
+#include "Info/Activities/Team/DoorInteractionActivity.h"
+#include "Info/Activities/MoveActivity.h"
+#include "Info/Activities/MoveToExitActivity.h"
+#include "Subsystems/AchievementSubsystem.h"
+
+DECLARE_CYCLE_STAT(TEXT("RoN ~ Player Tick"), STAT_RoNPlayerTick, STATGROUP_PlayerCharacter);
+DECLARE_CYCLE_STAT(TEXT("RoN ~ Calculate Sprint Vector Offset"), STAT_CalculateSprintVectorOffset, STATGROUP_PlayerCharacter);
+DECLARE_CYCLE_STAT(TEXT("RoN ~ Push Nearby AI"), STAT_PushNearbyCharacters, STATGROUP_PlayerCharacter);
+DECLARE_CYCLE_STAT(TEXT("RoN ~ Handle Movement"), STAT_HandleMovement, STATGROUP_PlayerCharacter);
+DECLARE_CYCLE_STAT(TEXT("RoN ~ Local Player Updates"), STAT_LocalPlayerUpdates, STATGROUP_PlayerCharacter);
+DECLARE_CYCLE_STAT(TEXT("RoN ~ Calculate Stop Location"), STAT_CalculateStopLocation, STATGROUP_PlayerCharacter);
+DECLARE_CYCLE_STAT(TEXT("RoN ~ Can Be Seen From (PlayerCharacter)"), STAT_CanBeSeenFrom, STATGROUP_PlayerCharacter);
+DECLARE_CYCLE_STAT(TEXT("RoN ~ Vault Traces"), STAT_VaultTraces, STATGROUP_PlayerCharacter);
+
+TAutoConsoleVariable<int32> CVar_DebugDrawLocoPath(TEXT("a.PlayerCharacter.DebugDrawLocoPath"), 0, TEXT("Toggle Debug Information for Locomotion."));
+TAutoConsoleVariable<int32> CVarEnablePelvisMovementBob(TEXT("a.PlayerCharacter.PelvisFPMovementBob.Enable"), 0, TEXT("Toggle Pelvis Movement Bob"));
+TAutoConsoleVariable<float> CVarPelvisMovementDamping(TEXT("a.PlayerCharacter.PelvisFPMovementDamping"), 0.38f, TEXT("Pelvis Movement Bob Damping"));
+
+APlayerCharacter::APlayerCharacter(const FObjectInitializer& ObjectInitializer)
+{
+	ThirdPersonCameraArm = CreateDefaultSubobject<USpringArmComponent>(TEXT("ThirdPersonCameraArm"));
+	ThirdPersonCameraArm->TargetOffset = FVector(0.f, 0.f, 0.f);
+	ThirdPersonCameraArm->SetRelativeLocation(FVector(-40.f, 0.f, 160.f));
+	ThirdPersonCameraArm->SetRelativeRotation(FRotator(-10.f, 0.f, 0.f));
+	ThirdPersonCameraArm->SetupAttachment(GetCapsuleComponent()); // make sure its part of the capsule
+	ThirdPersonCameraArm->TargetArmLength = 200.f;
+	ThirdPersonCameraArm->bEnableCameraLag = false;
+	ThirdPersonCameraArm->bEnableCameraRotationLag = false;
+	ThirdPersonCameraArm->bUsePawnControlRotation = true; // let the controller handle the view rotation
+	ThirdPersonCameraArm->bInheritYaw = true;
+	ThirdPersonCameraArm->bInheritPitch = true;
+	ThirdPersonCameraArm->bInheritRoll = false;
+
+	ThirdPersonCameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("ThirdPersonCamera"));
+	ThirdPersonCameraComponent->SetupAttachment(ThirdPersonCameraArm, USpringArmComponent::SocketName);
+	ThirdPersonCameraComponent->bUsePawnControlRotation = false; // the arm is already doing the rotation
+	ThirdPersonCameraComponent->FieldOfView = 90.f;
+
+	// Create a mesh component that will be used when being viewed from a '1st person' view (when controlling this pawn)
+	Mesh1P = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("CharacterMesh1P"));
+	Mesh1P->SetOnlyOwnerSee(true);
+	Mesh1P->SetupAttachment(GetCapsuleComponent());
+	Mesh1P->bCastDynamicShadow = false;
+	Mesh1P->CastShadow = false;
+	Mesh1P->SetReceivesDecals(false);
+	Mesh1P->bUpdateOverlapsOnAnimationFinalize = false;
+	Mesh1P->bSimulationUpdatesChildTransforms = false;
+	Mesh1P->AddTickPrerequisiteComponent(GetMesh());
+	GetMesh()->bUpdateOverlapsOnAnimationFinalize = false;
+	GetMesh()->bSimulationUpdatesChildTransforms = false;
+
+	FirstPersonCameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("FirstPersonCamera"));
+	FirstPersonCameraComponent->SetupAttachment(GetMesh1P(), FName("fp_camera_socket"));
+	FirstPersonCameraComponent->SetRelativeRotation(FRotator(0.0f, 90.0f, 0.0f)); // needed due to joint orients
+	FirstPersonCameraComponent->bUsePawnControlRotation = false;
+
+	PlayerPostProcessingComp = CreateDefaultSubobject<UPlayerPostProcessing>(TEXT("PlayerPostProcessingComp"));
+	PlayerPostProcessingComp->SetupAttachment(FirstPersonCameraComponent);
+
+	BleedComponent = CreateDefaultSubobject<UBleedComponent>(TEXT("Bleed Component"));
+	BleedComponent->SetIsReplicated(true);
+
+	PlayerMarkerComponent->bEnabled = true;
+	
+	// needed for fp legs to work
+	GetMesh()->bCastHiddenShadow = true;
+	
+	MeshBody1P = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("MeshBody1P"));
+	if (MeshBody1P)
+	{
+		MeshBody1P->AlwaysLoadOnClient = true;
+		MeshBody1P->AlwaysLoadOnServer = true;
+		MeshBody1P->SetOnlyOwnerSee(true);
+		MeshBody1P->bUseAttachParentBound = true;
+		MeshBody1P->bCastDynamicShadow = false;
+		MeshBody1P->CastShadow = false;
+		
+		// Mesh body is now attached to the main 3p mesh, makes legs shadows more accurate and hides weird distortion at the waist
+		MeshBody1P->SetupAttachment(GetMesh());
+		MeshBody1P->SetMasterPoseComponent(GetMesh());
+		MeshBody1P->AddTickPrerequisiteComponent(GetMesh());
+	}
+
+	FMODBreathingAudioComp = CreateDefaultSubobject<UFMODAudioComponent>(TEXT("FMODBreathingAudioComp"));
+	FMODBreathingAudioComp->SetupAttachment(GetMesh(), "head");
+	FMODBreathingAudioComp->SetRelativeLocation(FVector::ZeroVector);
+
+	ScoringComponent = CreateDefaultSubobject<UScoringComponent>(TEXT("Scoring Component"));
+	ScoringComponent->bAutoAddToScorePool = false;
+	ScoringComponent->ObjectiveLevel = EObjectiveLevel::SecondaryObjective;
+	
+	// Ray Tracking Cxes
+	GetMesh1P()->bVisibleInRayTracing = false;
+	MeshBody1P->bVisibleInRayTracing = false;
+	
+	LeftFootEnum = EFootConstEnum::FCE_Forward;
+	RightFootEnum = EFootConstEnum::FCE_Forward;
+	FootAdjustOffset = 3.f;
+	FootInterpSpeed = 15.f;
+	FootRotationInterpSpeed = 15.f;
+	HipInterpSpeed = 10.f;
+	TraceDistance = 55.f;
+	TraceOffset = 50.f;
+	VelocityThreshold = 10.f;
+	
+	MeshGearSlot->bEnableUpdateRateOptimizations = false;
+
+	GetMesh1P()->SetGenerateOverlapEvents(false);
+	GetCapsuleComponent()->SetGenerateOverlapEvents(false);
+	GetMesh()->SetGenerateOverlapEvents(true);
+	GetMesh()->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+
+	GetCapsuleComponent()->bNavigationRelevant = false;
+	GetCapsuleComponent()->SetCanEverAffectNavigation(false);
+
+	// game doesn't load if this isn't locked behind WITH_EDITOR
+	#if WITH_EDITOR
+	static ConstructorHelpers::FClassFinder<UObject> SightTweakerClass(TEXT("/Game/Blueprints/Widgets/Dev/SightTweakerWidget.SightTweakerWidget_C"));
+	SightTweakerWidgetTemplate = SightTweakerClass.Class;
+	#endif
+	
+	IFMODStudioModule::Get();
+
+	bCopyTPMeshTransformsToFP = true;
+
+	PrimaryItemVisualizationComponent = CreateDefaultSubobject<UItemVisualizationComponent>(TEXT("PrimaryItemVisualizationComponent"));
+	PrimaryItemVisualizationComponent->SetupAttachment(GetMesh(), "RightWeaponSocket");
+	PrimaryItemVisualizationComponent->VisualizationType = EItemVisualizationType::IVT_Primary;
+	
+	SecondaryItemVisualizationComponent = CreateDefaultSubobject<UItemVisualizationComponent>(TEXT("SecondaryItemVisualizationComponent"));
+	SecondaryItemVisualizationComponent->SetupAttachment(GetMesh(), "RightWeaponSocket");
+	SecondaryItemVisualizationComponent->VisualizationType = EItemVisualizationType::IVT_Secondary;
+	
+	LongTacticalVisualizationComponent = CreateDefaultSubobject<UItemVisualizationComponent>(TEXT("LongTacticalVisualizationComponent"));
+	LongTacticalVisualizationComponent->SetupAttachment(GetMesh(), "RightWeaponSocket");
+	LongTacticalVisualizationComponent->VisualizationType = EItemVisualizationType::IVT_LongTactical;
+	
+	HelmetVisualizationComponent = CreateDefaultSubobject<UItemVisualizationComponent>(TEXT("HelmetVisualizationComponent"));
+	HelmetVisualizationComponent->SetupAttachment(GetMesh(), "RightWeaponSocket");
+	HelmetVisualizationComponent->VisualizationType = EItemVisualizationType::IVT_Helmet;
+
+	ArmorVisualizationComponent = CreateDefaultSubobject<UItemVisualizationComponent>(TEXT("ArmorVisualizationComponent"));
+	ArmorVisualizationComponent->SetupAttachment(GetMesh(), "RightWeaponSocket");
+	ArmorVisualizationComponent->VisualizationType = EItemVisualizationType::IVT_Armor;
+	
+	EquippedItemVisualizationComponent = CreateDefaultSubobject<UItemVisualizationComponent>(TEXT("EquippedVisualizationComponent"));
+	EquippedItemVisualizationComponent->SetupAttachment(GetMesh(), "RightWeaponSocket");
+	EquippedItemVisualizationComponent->VisualizationType = EItemVisualizationType::IVT_Equipped;
+}
+
+bool APlayerCharacter::GetItemWheelActive()
+{
+	return bItemWheelActive;
+} 
+
+bool APlayerCharacter::GetCommandWheelActive()
+{
+	return bCommandWheelActive;
+} 
+
+void APlayerCharacter::GetLifetimeReplicatedProps(TArray< FLifetimeProperty >& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	//DOREPLIFETIME_CONDITION(APlayerCharacter, Actor_RotationRate, COND_SkipOwner);
+	//DOREPLIFETIME(APlayerCharacter, Server_BaseAimRotation);
+	DOREPLIFETIME(APlayerCharacter, bStunAimLocked);
+	DOREPLIFETIME(APlayerCharacter, bHoldingFastWalk);
+
+	/*DOREPLIFETIME_CONDITION(APlayerCharacter, Camera_RotationRate, COND_SkipOwner);*/
+	
+	DOREPLIFETIME_CONDITION(APlayerCharacter, HitSpeedMultiplier, COND_OwnerOnly);
+	DOREPLIFETIME_CONDITION(APlayerCharacter, WalkSpeedRampMultiplier, COND_OwnerOnly);
+	DOREPLIFETIME_CONDITION(APlayerCharacter, SprintSpeedRampUpMultiplier, COND_OwnerOnly);
+
+	DOREPLIFETIME(APlayerCharacter, Rep_FPBodyMesh);
+
+	
+	DOREPLIFETIME_CONDITION(APlayerCharacter, FreeLookCache, COND_SkipOwner);
+
+	DOREPLIFETIME_CONDITION(APlayerCharacter, bFireLoop, COND_SkipOwner);
+	DOREPLIFETIME(APlayerCharacter, bAllowPlacement);
+	DOREPLIFETIME(APlayerCharacter, bWeaponDown3P);
+	//DOREPLIFETIME_CONDITION(APlayerCharacter, LastSetRunSpeed, COND_OwnerOnly);
+
+	DOREPLIFETIME(APlayerCharacter, Replicated_1PAnimInstance);
+
+	DOREPLIFETIME(APlayerCharacter, RunSpeed);
+
+	DOREPLIFETIME(APlayerCharacter, BlendedBone);
+	DOREPLIFETIME(APlayerCharacter, bWalking);
+	DOREPLIFETIME(APlayerCharacter, bDisableSprinting);
+
+	DOREPLIFETIME(APlayerCharacter, bIsWearingHeavyArmour);
+	
+	DOREPLIFETIME(APlayerCharacter, CurrentViewCharacter);
+
+	DOREPLIFETIME(APlayerCharacter, Replicated_3PAnimInstance);
+
+	DOREPLIFETIME(APlayerCharacter, SlowDownSpeedMultiplier);
+	DOREPLIFETIME(APlayerCharacter, MaxCrouchRunSpeedPercent);
+	DOREPLIFETIME(APlayerCharacter, LastSetRunSpeed);
+	DOREPLIFETIME(APlayerCharacter, bIsThirdPerson);
+	DOREPLIFETIME(APlayerCharacter, Server_BaseAimRotation);
+
+	DOREPLIFETIME(APlayerCharacter, CurrentRunSpeedPercent);
+	DOREPLIFETIME(APlayerCharacter, MaxRunSpeedPercent);
+	DOREPLIFETIME(APlayerCharacter, MinWalkSpeedPercent);
+
+	DOREPLIFETIME(APlayerCharacter, bIsStopping);
+
+	DOREPLIFETIME(APlayerCharacter, CurrentMeshRot);
+	DOREPLIFETIME_CONDITION(APlayerCharacter, bForceLowReady, COND_OwnerOnly);
+
+	DOREPLIFETIME_CONDITION(APlayerCharacter, bServerIsBlockingAnimationPlaying, COND_OwnerOnly);
+	
+	DOREPLIFETIME(APlayerCharacter, ReplicatedFPMesh);
+
+	DOREPLIFETIME(APlayerCharacter, LastCollectedEvidence);
+	DOREPLIFETIME(APlayerCharacter, LastInteractableComponent);
+	
+	DOREPLIFETIME(APlayerCharacter, RevivingPlayer);
+	DOREPLIFETIME(APlayerCharacter, BeingRevivedByPlayer);
+	DOREPLIFETIME(APlayerCharacter, RevivingOperatingTime);
+}
+
+FInputActionBinding APlayerCharacter::BindingNoConsume(FName InActionName, EInputEvent InKeyEvent, void (APlayerCharacter::*Func) ())
+{
+	FInputActionBinding Binding = FInputActionBinding(InActionName, InKeyEvent);
+	Binding.bConsumeInput = false;
+	Binding.bExecuteWhenPaused = true;
+	Binding.ActionDelegate.BindDelegate(this, Func);
+
+	return Binding;
+}
+
+void APlayerCharacter::SetupPlayerInputComponent(class UInputComponent* inputComponent)
+{
+	// set up gameplay key bindings
+	check(inputComponent);
+
+	#ifdef RON_NO_JUMP
+	//inputComponent->BindAction("Jump", IE_Pressed, this, &APlayerCharacter::IssueDefaultCommand); This causes IssueDefaultCommand to always be bound to the jump button, i.e. space
+	#else
+	inputComponent->BindAction("Jump", IE_Pressed, this, &APlayerCharacter::PlayerJump);
+	inputComponent->BindAction("Jump", IE_Released, this, &APlayerCharacter::PlayerStopJumping);
+	#endif
+
+	inputComponent->BindAction("Fire", IE_Pressed, this, &APlayerCharacter::PrimaryUse);
+	inputComponent->BindAction("Fire", IE_Released, this, &APlayerCharacter::EndPrimaryUse);
+
+	InputComponent->AddActionBinding(BindingNoConsume("Use", IE_Pressed, &APlayerCharacter::Use));
+	InputComponent->AddActionBinding(BindingNoConsume("Use", IE_Released, &APlayerCharacter::EndUse));
+	InputComponent->AddActionBinding(BindingNoConsume("Use", IE_DoubleClick, &APlayerCharacter::DoubleTapUse));
+
+	inputComponent->BindAction("UseOnly", IE_Pressed, this, &APlayerCharacter::UseOnly);
+	inputComponent->BindAction("UseOnly", IE_Released, this, &APlayerCharacter::EndUseOnly);
+	inputComponent->BindAction("Yell", IE_Pressed, this, &APlayerCharacter::Yell);
+
+	inputComponent->BindAction("BuyMenu", IE_Pressed, this, &APlayerCharacter::OpenBuyMenuPressed);
+	inputComponent->BindAction("Melee", IE_Pressed, this, &APlayerCharacter::Melee);
+	
+	//inputComponent->BindAction("Ping", IE_Pressed, this, &APlayerCharacter::Ping);
+
+	inputComponent->BindAction("ToggleADS", IE_Pressed, this, &APlayerCharacter::ToggleADS);
+	
+	inputComponent->BindAction("SecondaryUse", IE_Pressed, this, &APlayerCharacter::SecondaryUse);
+	inputComponent->BindAction("SecondaryUse", IE_Released, this, &APlayerCharacter::EndSecondaryUse);
+	//inputComponent->BindAction("SecondaryUse", IE_Repeat, this, &APlayerCharacter::EndSecondaryUse);
+
+	inputComponent->BindAction("Reload", IE_Pressed, this, &APlayerCharacter::Reload);
+
+	inputComponent->BindAction("TacticalReload", IE_Pressed, this, &APlayerCharacter::TacticalReload);
+
+	inputComponent->BindAction("Reload/MagCheck", IE_Pressed, this, &APlayerCharacter::ReloadOrMagCheck);
+	inputComponent->BindAction("Reload/MagCheck", IE_DoubleClick, this, &APlayerCharacter::Reload);
+	inputComponent->BindAction("Reload/MagCheck", IE_Released, this, &APlayerCharacter::ReloadOrMagCheck_Released);
+
+	inputComponent->BindAction("LowReady", IE_Pressed, this, &APlayerCharacter::OnLowReadyButtonDown);
+	inputComponent->BindAction("LowReady", IE_Released, this, &APlayerCharacter::OnLowReadyButtonUp);
+	inputComponent->BindAction("LowReadyToggle", IE_Pressed, this, &APlayerCharacter::ToggleLowReady);
+
+	inputComponent->BindAction("MagCheck", IE_Pressed, this, &APlayerCharacter::MagCheck);
+
+	inputComponent->BindAction("TeamView", IE_Pressed, this, &APlayerCharacter::TryNextPlayerView_Pressed);
+	inputComponent->BindAction("TeamView", IE_Released, this, &APlayerCharacter::TryNextPlayerView_Released);
+
+	inputComponent->BindAction("DrawC2", IE_Pressed, this, &APlayerCharacter::EquipC2);
+	inputComponent->BindAction("DrawBSG", IE_Pressed, this, &APlayerCharacter::EquipBreachingShotgun);
+	inputComponent->BindAction("DrawOC", IE_Pressed, this, &APlayerCharacter::EquipPepperspray);
+	inputComponent->BindAction("DrawDoorjam", IE_Pressed, this, &APlayerCharacter::EquipDoorJam);
+	inputComponent->BindAction("DrawMirrorgun", IE_Pressed, this, &APlayerCharacter::EquipMirrorgun);
+	inputComponent->BindAction("DrawFlashbang", IE_Pressed, this, &APlayerCharacter::EquipFlashbang);
+	inputComponent->BindAction("DrawCSGas", IE_Pressed, this, &APlayerCharacter::EquipCSGas);
+	inputComponent->BindAction("DrawSting", IE_Pressed, this, &APlayerCharacter::EquipStinger);
+	inputComponent->BindAction("DrawZipcuffs", IE_Pressed, this, &APlayerCharacter::EquipZipcuffs);
+	inputComponent->BindAction("DrawMultitool", IE_Pressed, this, &APlayerCharacter::EquipMultitool);
+	inputComponent->BindAction("ToggleUnderbarrel", IE_Pressed, this, &APlayerCharacter::ToggleUnderbarrelAttachment);
+
+	inputComponent->BindAxis("MoveForward", this, &APlayerCharacter::MoveForward);
+	inputComponent->BindAxis("MoveRight", this, &APlayerCharacter::MoveRight);
+
+	inputComponent->BindAxis("MoveForward", this, &APlayerCharacter::LeanUp);
+	inputComponent->BindAxis("MoveRight", this, &APlayerCharacter::LeanRight);
+
+	inputComponent->BindAction("Walk", IE_Pressed, this, &APlayerCharacter::Sprint);
+	inputComponent->BindAction("Walk", IE_Repeat, this, &APlayerCharacter::TryRepeatSprint);
+	inputComponent->BindAction("Walk", IE_Released, this, &APlayerCharacter::Walk);
+	
+	inputComponent->BindAction("ToggleWalk", IE_Pressed, this, &APlayerCharacter::ToggleWalk);
+	
+	inputComponent->BindAction("ToggleSprint", IE_Pressed, this, &APlayerCharacter::ToggleSprint);
+
+	inputComponent->BindAction("Crouch", IE_Pressed, this, &APlayerCharacter::DoCrouch);
+	inputComponent->BindAction("Crouch", IE_Released, this, &APlayerCharacter::EndCrouch);
+	inputComponent->BindAction("ToggleCrouch", IE_Pressed, this, &APlayerCharacter::ToggleCrouch);
+
+	inputComponent->BindAction("FreeLean", IE_Pressed, this, &APlayerCharacter::DoFreeLean);
+	inputComponent->BindAction("FreeLean", IE_Released, this, &APlayerCharacter::EndFreeLean);
+	inputComponent->BindAction("ToggleFreeLean", IE_Pressed, this, &APlayerCharacter::ToggleFreeLean);
+
+	inputComponent->BindAction("FireSelect", IE_Pressed, this, &APlayerCharacter::FireSelect);
+	inputComponent->BindAction("FireSelect", IE_Released, this, &APlayerCharacter::FireSelectReleased);
+
+	inputComponent->BindAction("SwitchAmmoType", IE_Pressed, this, &APlayerCharacter::SwitchAmmoType);
+
+	inputComponent->BindAction("DropChem", IE_Pressed, this, &APlayerCharacter::StartChemThrow);
+
+	inputComponent->BindAction("QuickThrow", IE_Pressed, this, &APlayerCharacter::StartQuickThrow);
+	inputComponent->BindAction("QuickThrow", IE_Released, this, &APlayerCharacter::EndQuickThrow);
+	
+	inputComponent->BindAction("FreeLook", IE_Pressed, this, &APlayerCharacter::StartFreeLook);
+	inputComponent->BindAction("FreeLook", IE_Released, this, &APlayerCharacter::StopFreeLook);
+	inputComponent->BindAction("ToggleFreeLook", IE_Pressed, this, &APlayerCharacter::ToggleFreeLook);
+
+	// We have 2 versions of the rotation bindings to handle different kinds of devices differently
+	// "turn" handles devices that provide an absolute delta, such as a mouse.
+	// "turnrate" is for devices that we choose to treat as a rate of change, such as an analog joystick
+	inputComponent->BindAxis("Turn", this, &APlayerCharacter::AddYaw);
+	inputComponent->BindAxis("TurnRate", this, &APlayerCharacter::TurnAtRate);
+	inputComponent->BindAxis("LookUp", this, &APlayerCharacter::AddPitch);
+	inputComponent->BindAxis("LookUpRate", this, &APlayerCharacter::LookUpAtRate);
+	
+	//inputComponent->BindAxis("FireAxis", this, &APlayerCharacter::PrimaryUseAxis);
+
+	#ifndef RON_NO_INCREMENTAL_SPEED
+	inputComponent->BindAxis("IncrementalSystemAxis", this, &APlayerCharacter::IncrementalUse);
+	inputComponent->BindAxis("IncrementalSystemManual", this, &APlayerCharacter::IncrementalUse);
+	#endif
+
+	inputComponent->BindAxisKey(EKeys::MouseWheelAxis); // For item selection whilst holding a key using mouse wheel
+
+	//inputComponent->BindAxis("Drone_MoveForward", this, &APlayerCharacter::Drone_MoveForward);
+	//inputComponent->BindAxis("Drone_Right", this, &APlayerCharacter::Drone_Right);
+	//inputComponent->BindAxis("Drone_Throttle", this, &APlayerCharacter::Drone_Throttle);
+	//inputComponent->BindAxis("Drone_Yaw", this, &APlayerCharacter::Drone_Yaw);
+	//inputComponent->BindAction("DroneSteady", IE_Released, this, &APlayerCharacter::Drone_Steady);
+	
+	inputComponent->BindAction("IssueDefaultCommand", IE_Pressed, this, &APlayerCharacter::IssueDefaultCommand);
+	inputComponent->BindAction("OpenSwatCommand", IE_Pressed, this, &APlayerCharacter::ToggleSwatCommandMenu);
+	inputComponent->BindAction("CycleSwatElementNext", IE_Pressed, this, &APlayerCharacter::CycleSwatElementNext);
+	inputComponent->BindAction("CycleSwatElementPrevious", IE_Pressed, this, &APlayerCharacter::CycleSwatElementPrevious);
+	inputComponent->BindAction("SelectElementGold", IE_Pressed, this, &APlayerCharacter::SelectElementGold);
+	inputComponent->BindAction("SelectElementBlue", IE_Pressed, this, &APlayerCharacter::SelectElementBlue);
+	inputComponent->BindAction("SelectElementRed", IE_Pressed, this, &APlayerCharacter::SelectElementRed);
+	
+	inputComponent->BindAction("UseNVG", IE_Pressed, this, &APlayerCharacter::ToggleNightvisionGoggles);
+
+	inputComponent->BindAxis("Lean", this, &APlayerCharacter::Lean);
+	inputComponent->BindAction("ToggleLeanLeft", IE_Pressed, this, &APlayerCharacter::DoToggleLeanLeft);
+	inputComponent->BindAction("ToggleLeanRight", IE_Pressed, this, &APlayerCharacter::DoToggleLeanRight);
+
+	inputComponent->BindAction("Chat", IE_Pressed, this, &APlayerCharacter::OnChatPressed);
+	inputComponent->BindAction("TeamChat", IE_Pressed, this, &APlayerCharacter::OnTeamChatPressed);
+	
+	inputComponent->BindAction("ToggleHUD", IE_Pressed, this, &APlayerCharacter::ToggleHUD);
+
+	// Cheat codes
+	#if !UE_BUILD_SHIPPING
+	inputComponent->BindAction("InstantSurrenderTarget", IE_Pressed, this, &APlayerCharacter::Server_InstantSurrenderTarget);
+	inputComponent->BindAction("LaserEyes", IE_Pressed, this, &APlayerCharacter::FireLaserEyes);
+	inputComponent->BindAction("PermanentMarker", IE_Pressed, this, &APlayerCharacter::DrawPermanentMarker);
+	#endif
+
+	// sight switching addition
+	inputComponent->BindAction("ToggleSecondarySight", IE_Pressed, this, &APlayerCharacter::ToggleSecondarySight);
+	inputComponent->BindAction("ToggleCantedSight", IE_Pressed, this, &APlayerCharacter::ToggleCantedSight);
+
+	inputComponent->BindAction("OpenTablet", IE_Pressed, this, &APlayerCharacter::OpenTabletPressed);
+	inputComponent->BindAction("OpenTablet", IE_Released, this, &APlayerCharacter::OpenTabletReleased);
+
+
+
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadTacticalCycle", IE_Pressed, &APlayerCharacter::GamepadTacticalCyclePressed));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadTacticalCycle", IE_Released, &APlayerCharacter::GamepadTacticalCycleReleased));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadAttachmentCycle", IE_Pressed, &APlayerCharacter::GamepadAttachmentCyclePressed));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadAttachmentCycle", IE_Released, &APlayerCharacter::GamepadAttachmentCycleReleased));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadGrenadeCycle", IE_Pressed, &APlayerCharacter::GamepadGrenadeCyclePressed));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadGrenadeCycle", IE_Released, &APlayerCharacter::GamepadGrenadeCycleReleased));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadAimCycle", IE_Pressed, &APlayerCharacter::GamepadAimCycle));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadWeaponCycle", IE_Pressed, &APlayerCharacter::GamepadWeaponCycleReleased));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadToggleNightvision", IE_Pressed, &APlayerCharacter::GamepadToggleNightvision));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadADS", IE_Pressed, &APlayerCharacter::GamepadADSPressed));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadADS", IE_Released, &APlayerCharacter::GamepadADSReleased));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadToolCycle", IE_Pressed, &APlayerCharacter::GamepadToolCyclePressed));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadToolCycle", IE_Released, &APlayerCharacter::GamepadToolCycleReleased));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadReload", IE_Pressed, &APlayerCharacter::GamepadReloadPressed));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadReload", IE_Released, &APlayerCharacter::GamepadReloadReleased));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadAccept", IE_Pressed, &APlayerCharacter::GamepadAcceptPressed));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadAccept", IE_Released, &APlayerCharacter::GamepadAcceptReleased));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadDecline", IE_Pressed, &APlayerCharacter::GamepadDeclinePressed));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadDecline", IE_Released, &APlayerCharacter::GamepadDeclineReleased));
+	
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadLeanLeft", IE_Pressed, &APlayerCharacter::GamepadLeanLeftPressed));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadLeanRight", IE_Pressed, &APlayerCharacter::GamepadLeanRightPressed));
+
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadWeaponCycle", IE_Pressed, &APlayerCharacter::GamepadWeaponCyclePressed));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadWeaponCycle", IE_Released, &APlayerCharacter::GamepadWeaponCycleReleased));
+
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadToggleCrouch", IE_Pressed, &APlayerCharacter::GamepadToggleCrouchPressed));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadToggleCrouch", IE_Released, &APlayerCharacter::GamepadToggleCrouchReleased));
+
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadOpenCommandInterface", IE_Pressed, &APlayerCharacter::GamepadOpenCommandInterfacePressed));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadOpenCommandInterface", IE_Released, &APlayerCharacter::GamepadOpenCommandInterfaceReleased));
+
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadCloseCommandInterface", IE_Pressed, &APlayerCharacter::GamepadCloseCommandInterfacePressed));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadCloseCommandInterface", IE_Released, &APlayerCharacter::GamepadCloseCommandInterfaceReleased));
+
+	// InputComponent->AddActionBinding(BindingNoConsume("GamepadTeamView", IE_Pressed, &APlayerCharacter::GamepadTeamViewPressed));
+	// InputComponent->AddActionBinding(BindingNoConsume("GamepadTeamView", IE_Released, &APlayerCharacter::GamepadTeamViewReleased));
+
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadMelee", IE_Pressed, &APlayerCharacter::GamepadMeleePressed));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadMelee", IE_Released, &APlayerCharacter::GamepadMeleeReleased));
+
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadCycleSwatElement", IE_Pressed, &APlayerCharacter::GamepadCycleSwatElementPressed));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadCycleSwatElement", IE_Released, &APlayerCharacter::GamepadCycleSwatElementReleased));
+
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadCommandInterfaceLeft", IE_Pressed, &APlayerCharacter::GamepadCommandInterfaceLeft));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadCommandInterfaceRight", IE_Pressed, &APlayerCharacter::GamepadCommandInterfaceRight));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadCommandInterfaceUp", IE_Pressed, &APlayerCharacter::GamepadCommandInterfaceUpPressed));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadCommandInterfaceUp", IE_Released, &APlayerCharacter::GamepadCommandInterfaceUpReleased));
+	
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadCommandInterfaceDown", IE_Pressed, &APlayerCharacter::GamepadCommandInterfaceDownPressed));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadCommandInterfaceDown", IE_Released, &APlayerCharacter::GamepadCommandInterfaceDownReleased));
+
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadItemWheel", IE_Pressed, &APlayerCharacter::GamepadItemWheelPressed));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadItemWheel", IE_Released, &APlayerCharacter::GamepadItemWheelReleased));
+	
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadItemWheelCancel", IE_Pressed, &APlayerCharacter::GamepadItemWheelCancelPressed));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadItemWheelCancel", IE_Released, &APlayerCharacter::GamepadItemWheelCancelReleased));
+
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadCommandWheel", IE_Pressed, &APlayerCharacter::GamepadCommandWheelPressed));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadCommandWheel", IE_Released, &APlayerCharacter::GamepadCommandWheelReleased));
+
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadCommandWheelFreeViewCancel", IE_Pressed, &APlayerCharacter::GamepadCommandWheelFreeViewCancel));
+	InputComponent->AddActionBinding(BindingNoConsume("GamepadCommandWheelFreeViewConfirm", IE_Pressed, &APlayerCharacter::GamepadCommandWheelFreeViewConfirm));
+
+	InputComponent->BindAxis("GamepadLeanAxis", this, &APlayerCharacter::GamepadLeanAxis);
+}
+
+void APlayerCharacter::GamepadCommandWheelPressed()
+{
+	if(!bItemWheelActive && !bCommandMenuLocked)
+	{
+		bCommandWheelActive = true;
+		if (HumanCharacterWidget_V2 != nullptr && HumanCharacterWidget_V2->GetCommandWheel() != nullptr)
+		{
+			HumanCharacterWidget_V2->GetCommandWheel()->Enable(); 
+		} 
+	}
+}
+
+void APlayerCharacter::GamepadCommandWheelReleased()
+{
+	if (HumanCharacterWidget_V2 == nullptr && HumanCharacterWidget_V2->GetCommandWheel() == nullptr)
+	{
+		bCommandWheelActive = false;
+		return;
+	}
+	
+	HumanCharacterWidget_V2->GetCommandWheel()->ConfirmCommand(); 
+	bCommandWheelActive = HumanCharacterWidget_V2->GetCommandWheel()->IsInFreeView();
+}
+
+void APlayerCharacter::GamepadCommandWheelFreeViewCancel()
+{
+	if(!bCommandWheelActive || HumanCharacterWidget_V2 == nullptr || HumanCharacterWidget_V2->GetCommandWheel() == nullptr)
+	{
+		return;
+	}
+
+	if(HumanCharacterWidget_V2->GetCommandWheel()->IsInFreeView())
+	{
+		bCommandWheelActive = false;
+		HumanCharacterWidget_V2->GetCommandWheel()->Disable();
+	}
+}
+
+void APlayerCharacter::GamepadCommandWheelFreeViewConfirm()
+{
+	if(!bCommandWheelActive || HumanCharacterWidget_V2 == nullptr || HumanCharacterWidget_V2->GetCommandWheel() == nullptr)
+	{
+		return;
+	}
+	bCommandWheelActive = false;
+	HumanCharacterWidget_V2->GetCommandWheel()->FreeViewConfirm();
+}
+
+void APlayerCharacter::GamepadItemWheelPressed()
+{
+	if(bCommandWheelActive && HumanCharacterWidget_V2 != nullptr || HumanCharacterWidget_V2->GetCommandWheel() != nullptr)
+	{
+		if(HumanCharacterWidget_V2->GetCommandWheel()->IsInFreeView())
+		{
+			HumanCharacterWidget_V2->GetCommandWheel()->Disable();
+			bCommandWheelActive = false;
+		}
+	}
+	
+	if (!bCommandWheelActive)
+	{
+		bItemWheelActive = true;
+		GetWorld()->GetTimerManager().SetTimer(ItemWheelTimerHandle, 0.35, false);
+		if (HumanCharacterWidget_V2 != nullptr && HumanCharacterWidget_V2->GetItemWheel() != nullptr)
+		{
+			HumanCharacterWidget_V2->GetItemWheel()->Enable();
+		} 
+	}
+}
+
+void APlayerCharacter::GamepadItemWheelReleased()
+{
+	bItemWheelActive = false;
+	if (HumanCharacterWidget_V2 != nullptr && HumanCharacterWidget_V2->GetItemWheel() != nullptr)
+	{
+		HumanCharacterWidget_V2->GetItemWheel()->ConfirmSelection();
+		HumanCharacterWidget_V2->GetItemWheel()->Disable();
+	}
+	if(GetWorld()->GetTimerManager().GetTimerRemaining(ItemWheelTimerHandle) > 0.0f)
+	{
+		InventoryComp->EquipLastEquippedItemWheel();
+	}
+	GetWorld()->GetTimerManager().ClearTimer(ItemWheelTimerHandle);
+}
+
+void APlayerCharacter::GamepadItemWheelCancelPressed()
+{
+	if (HumanCharacterWidget_V2 != nullptr && HumanCharacterWidget_V2->GetItemWheel() != nullptr && bItemWheelActive)
+	{
+		HumanCharacterWidget_V2->GetItemWheel()->CancelSelection();
+	}
+	else if (HumanCharacterWidget_V2 != nullptr && HumanCharacterWidget_V2->GetCommandWheel() != nullptr && bCommandWheelActive)
+	{
+		HumanCharacterWidget_V2->GetCommandWheel()->Cancel(); 
+	}
+}
+
+void APlayerCharacter::GamepadItemWheelCancelReleased()
+{
+}
+
+void APlayerCharacter::GamepadLeanLeftPressed()
+{
+	if (!bItemWheelActive && !bCommandWheelActive)
+	{
+		if (bUsingAlternateControls && bGamepadADSActive)
+		{
+			ToggleLeanLeft(bGamepadADSActive);
+		}
+		else if (!bUsingAlternateControls)
+		{
+			ToggleLeanLeft(bGamepadADSActive);
+		}
+	}
+}
+
+void APlayerCharacter::GamepadLeanRightPressed()
+{
+	if (!bItemWheelActive && !bCommandWheelActive)
+	{
+		if (bUsingAlternateControls && bGamepadADSActive)
+		{
+			ToggleLeanRight(bGamepadADSActive);
+		}
+		else if (!bUsingAlternateControls)
+		{
+ 			ToggleLeanRight(bGamepadADSActive);
+		}
+	}
+}
+
+void APlayerCharacter::Destroyed()
+{
+	Super::Destroyed();
+
+	// ##UE5UPGRADE##
+	if (BloodPool && IsValid(BloodPool) && BloodPool->IsValidLowLevel())
+	{
+		GetWorld()->DestroyActor(BloodPool);
+	}
+	UnbindAllDelegates();
+}
+
+void APlayerCharacter::BeginPlay()
+{
+	Super::BeginPlay();
+
+	// This MUST be called, otherwise the tick order can change and the anim instance will break!
+	AddTickPrerequisiteComponent(GetMesh1P());
+	AddTickPrerequisiteComponent(GetMeshBody());
+	AddTickPrerequisiteComponent(GetMesh());
+
+	OnRep_Customization();
+
+	#if !WITH_EDITOR
+	DestroyNonDevelopmentComponents();
+	#endif
+	
+	PlayInitialCameraFade();
+
+	GetCharacterMovement()->MaxWalkSpeed = RunSpeed;
+	GetCharacterMovement()->MaxWalkSpeedCrouched = RunSpeed * SpeedModifier_Crouch;
+
+	FaceMesh->AddTickPrerequisiteComponent(GetMesh());
+	GetMesh1P()->AddTickPrerequisiteComponent(GetMesh());
+	MeshGearSlot->AddTickPrerequisiteComponent(GetMesh());
+	//FaceMesh->MasterPoseComponent = GetMesh();
+	//FaceMesh->SetMasterPoseComponent(GetMesh(), true);
+
+	DefaultRelativeLocation = GetFirstPersonCameraComponent()->GetRelativeTransform().GetLocation();
+	LowerRelativeLocation = DefaultRelativeLocation;
+	LowerRelativeLocation.Z = CrouchHeight;
+
+	LocationAtLastSound = GetActorLocation();
+	RotationAtLastSound = GetActorRotation();
+
+	// Set the equip index to 1 by default because first item palyer picks up is 0
+	EquipIndex = 1;
+
+	GetMesh()->SetIsReplicated(false);
+
+	CharacterHealth->OnFullResource.RemoveDynamic(this, &APlayerCharacter::OnFullHealth);
+	CharacterHealth->OnFullResource.AddDynamic(this, &APlayerCharacter::OnFullHealth);
+	CharacterHealth->OnLowResource.RemoveDynamic(this, &APlayerCharacter::OnLowHealth);
+	CharacterHealth->OnLowResource.AddDynamic(this, &APlayerCharacter::OnLowHealth);
+
+	Body1PMat = GetMesh()->CreateDynamicMaterialInstance(0);
+	GetMesh1P()->SetVisibility(false);
+
+	// set default ragdoll asset
+	if (DefaultRagdollPhysAsset)
+	{
+		Rep_ActiveRagdollPhysAsset = DefaultRagdollPhysAsset;
+		OnRep_ActiveRagdollPhysAsset();
+	}
+	
+	if (AReadyOrNotGameState* GameState = GetWorld()->GetGameState<AReadyOrNotGameState>())
+	{
+		GameState->AddGameEndListener(this);
+	}
+
+	// cache original offset for later usage
+	if (GetMesh1P())
+		OriginalFPMeshRelTranslation = GetMesh1P()->GetRelativeLocation();
+	
+	bDisableInventoryInput = false;
+
+#if !UE_BUILD_SHIPPING
+	if (CHECK_DEBUG_SUBSYSTEM)
+	{
+		bGodMode = DEBUG_SUBSYSTEM->bPlayerGodMode;
+		GetHealthComponent()->Server_SetUnlimitedResource(DEBUG_SUBSYSTEM->bInfiniteHealth);
+		GetHealthComponent()->SetUnlimitedResource(DEBUG_SUBSYSTEM->bInfiniteHealth);
+	}
+#endif
+}
+
+void APlayerCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	Super::EndPlay(EndPlayReason);
+	UCrowdManager* CrowdManager = UCrowdManager::GetCurrent(this);
+	if (CrowdManager)
+	{
+		CrowdManager->UnregisterAgent(this);
+	}
+	UnbindAllDelegates();
+}
+
+void APlayerCharacter::Tick(const float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+	
+	SCOPE_CYCLE_COUNTER(STAT_RoNPlayerTick);
+	
+	if (!GetWorld() || GetWorld() && GetWorld()->bIsTearingDown)
+		return;
+
+	if (IsLocalPlayer())
+	{
+		/*
+		 * NOTE(killo): this is a fat hack to get the body in place for paired interactions (i.e. kicking doors)
+		 * so they are more visible while keeping the feet further back so the shadows line up when players look
+		 * at their feet. please let me know if you mess with it
+		 */
+		GetMeshBody1P()->SetRelativeLocation(bIsPairedInteractionPlaying ? FVector(0.0f, 25.0f, 0.0f) : FVector::ZeroVector);
+	}
+	
+	
+	if (!UReadyOrNotFunctionLibrary::IsCoop(GetWorld()) && GetTeam() != ETeamType::TT_SERT_BLUE)
+	{
+		MeshGearSlot->SetHiddenInGame(true);
+	}
+	
+	if (bIsPreviewCharacter)
+	{
+		InteractableComponent->bEnabled = false;
+		return;
+	}
+
+	if (GetPlayerState())
+	{
+		LastKnownPlayerState = GetPlayerState();
+	}
+
+	PlayerControlledOnlyTick(DeltaSeconds);
+
+	// TODO(killo): server only, client only follows
+	GetCharacterMovement()->MaxAcceleration = GetMaxAcceleration();
+
+	// Map logic
+	// Note(Ali): Disabled until we have map working again
+	/*{
+		switch (GetTeam())
+		{
+			case ETeamType::TT_NONE:		MapActorComponent->SetIconColor(FColor::White); break;
+			case ETeamType::TT_SERT_RED:	MapActorComponent->SetIconColor(FColor::FromHex("FF2C35")); break;
+			case ETeamType::TT_SERT_BLUE:	MapActorComponent->SetIconColor(FColor::FromHex("1C85F4")); break;
+			case ETeamType::TT_SUSPECT:		MapActorComponent->SetIconColor(FColor::FromHex("FF2C35")); break;
+			case ETeamType::TT_CIVILIAN:	MapActorComponent->SetIconColor(FColor::FromHex("1C85F4")); break;
+			case ETeamType::TT_SQUAD:		MapActorComponent->SetIconColor(FColor::FromHex("F4D143")); break;
+			default:						MapActorComponent->SetIconColor(FColor::White); break;
+		}
+		
+		if (LOCAL_PLAYER)
+		{
+			if (AReadyOrNotPlayerState* RONPS = GetPlayerState<AReadyOrNotPlayerState>())
+			{
+				if (RONPS->IsSquadLeader() || LocalPlayer == this)
+					MapActorComponent->SetIconColor(FColor::FromHex("F4D143"));
+			}
+	
+			if (const AReadyOrNotGameState* RONGS = GetWorld()->GetGameState<AReadyOrNotGameState>())
+			{
+				if (RONGS->bPvPMode)
+				{
+					MapActorComponent->bCondition = PC->GetTeam() == GetTeam();
+				}
+				else
+				{
+					MapActorComponent->bCondition = IsOnSWATTeam();
+				}
+			}
+		}
+	}
+	*/
+	
+	// Note(Ali): Deprecated until reviving players is a thing
+	//if (IsDowned())
+	//{
+	//	bActionsLocked = true;
+	//	bDisableSprinting = true;
+	//}
+
+	CaptureFPCamera(DeltaSeconds);
+
+	TimeHoldingPrimaryUse = bHoldingPrimaryUse ? TimeHoldingPrimaryUse += DeltaSeconds : 0.0f;
+	
+	if (GetEquippedItem<ABaseMagazineWeapon>())
+	{
+		LastFireAttemptTime += DeltaSeconds;
+	}
+	
+	if (bStunAimLocked)
+	{
+		if (!IsStunned())
+		{
+			bStunAimLocked = false;
+		}
+	}
+
+	if (bIsFullAutoFiring)
+	{
+		TimeSinceAiming = 0.0f;
+	}
+	else
+	{
+		TimeSinceAiming += DeltaSeconds;
+	}
+
+	/* alex 20/11/22 implemented to fix issues with first person and crouching! */
+	/* this will copy the relative transform from the third person mesh, reason behind this is to get the crouch mesh compensation working in FP that is implemented by epic only on the default mesh! */
+	if (bCopyTPMeshTransformsToFP)
+	{
+		if (GetMesh())
+		{
+			if (!bIsPairedInteractionPlaying)
+				FPMeshRelativeTransform = FVector(OriginalFPMeshRelTranslation.X, OriginalFPMeshRelTranslation.Y, GetMesh()->GetRelativeLocation().Z);
+			else
+				FPMeshRelativeTransform = OriginalFPMeshRelTranslation;
+		}
+	}
+	else
+	{
+		FPMeshRelativeTransform = OriginalFPMeshRelTranslation;
+	}
+
+	if(GetMesh1P())
+	{
+		GetMesh1P()->SetRelativeLocation(FPMeshRelativeTransform, false, nullptr, ETeleportType::None);
+	}
+	
+	TimeSinceLastLightSourceCheck += DeltaSeconds;
+
+	// Crouching logic
+	const bool bAllActionsLocked = bActionsLocked || bMovementLocked;
+	if (!bAllActionsLocked)
+	{
+		if (bWantsToCrouch)
+		{
+			Crouch();
+		}
+		else
+		{
+			UnCrouch();
+		}
+	}
+}
+
+void APlayerCharacter::Tick_Authority(const float DeltaSeconds)
+{
+	Super::Tick_Authority(DeltaSeconds);
+
+	if (!IsDeadOrUnconscious())
+	{
+		Server_BaseAimRotation = GetBaseAimRotation();
+	}
+
+	TimeUntilNextPushOverlappingAI -= DeltaSeconds;
+	
+	if (TimeUntilNextPushOverlappingAI <= 0.0f)
+	{
+		PushOverlappingAI();
+		TimeUntilNextPushOverlappingAI = 0.05f;
+	}
+}
+
+void APlayerCharacter::PlayerControlledOnlyTick(float DeltaSeconds)
+{
+	const bool bIsLocallyControlled = IsLocalPlayer();
+	
+	// Tick timers
+	TimeEquipped = GetEquippedItem() ? TimeEquipped + DeltaSeconds : 0.0f; 
+
+	if (bHoldingUse && HoldingUseTime > 0.25f)
+	{
+		if (CanUse())
+		{
+			if (BleedComponent->CanHeal())
+			{
+				bHoldingUse = false;
+
+				Server_PrepareForHeal();
+			}
+		}
+	}
+
+	if (TimeUntilNextFullAutoFiring > 0.0f)
+	{
+		TimeUntilNextFullAutoFiring = FMath::Clamp(TimeUntilNextFullAutoFiring - DeltaSeconds, 0.0f, TimeUntilNextFullAutoFiring);
+		
+		if (bIsFullAutoFiring && TimeUntilNextFullAutoFiring <= 0.0f)
+		{
+			PrimaryUse();
+		}
+	}
+
+	if (bQuickThrowing)
+	{
+		if (QuickThrowItem == GetEquippedItem() && QuickThrowItem)
+		{
+			if (EndQuickThrowTime > 1.4f && bTryEndQuickThrow)
+			{
+				QuickThrowItem->bCanThrowGrenade = true;
+				DoEndQuickThrow();
+			}
+			else
+			{
+				if (!IsAnimationBlocking())
+				{
+					QuickThrowItem->OnItemPrimaryUse();
+				}
+			}
+		}
+		else
+		{
+			EndQuickThrowTime = 0.0f;
+		}
+		
+		EndQuickThrowTime += DeltaSeconds;
+	}
+	else
+	{
+		EndQuickThrowTime = 0.0f;
+	}
+
+	if (bHoldingUse)
+	{
+		HoldingUseTime += DeltaSeconds;
+	}
+
+	if (HumanCharacterWidget_V2)
+	{
+		if (IsCarrying() && !IsPlayingCarryAnims() && !UInteractionsData::IsPairedInteractionPlayingOn(this))
+		{
+			bool bUsingGamepad = UReadyOrNotFunctionLibrary::IsUsingGamepad(GetRONPlayerController());
+			int32 Slot1 = HumanCharacterWidget_V2->AssignPlayerActionPromptToFreeSlot_Reserved(UReadyOrNotFunctionLibrary::GetKeyFromInputActionName("Fire", bUsingGamepad), IE_Pressed, NSLOCTEXT("PlayerCharacter", "Drop Arrested", "Drop Arrested"), "Red", true, false);
+
+			FKey ThrowKey = UReadyOrNotFunctionLibrary::GetKeyFromInputActionName("SecondaryUse", bUsingGamepad);
+			if (!ThrowKey.IsValid())
+				ThrowKey = UReadyOrNotFunctionLibrary::GetKeyFromInputActionName("ToggleADS", bUsingGamepad);
+			
+			int32 Slot2 = HumanCharacterWidget_V2->AssignPlayerActionPromptToFreeSlot_Reserved(ThrowKey, IE_Pressed, NSLOCTEXT("PlayerCharacter", "Throw Arrested", "Throw Arrested"), "Red", true, false);
+
+			if (Slot1 > -1)
+				DropArrestedInteractionSlot = Slot1;
+
+			if (Slot2 > -1)
+				CarryArrestedInteractionSlot = Slot2;
+		}
+		else
+		{
+			HumanCharacterWidget_V2->RemovePlayerActionPrompt_Reserved(DropArrestedInteractionSlot);
+			HumanCharacterWidget_V2->RemovePlayerActionPrompt_Reserved(CarryArrestedInteractionSlot);
+
+			DropArrestedInteractionSlot = -1;
+			CarryArrestedInteractionSlot = -1;
+		}
+	}
+
+	if (bIsLocallyControlled)
+	{
+		if (TeamViewWidget)
+		{
+			ATablet* Tablet = GetEquippedItem<ATablet>();
+			UTabletWidget* TabletWidget = Tablet && Tablet->WidgetComponent ? Cast<UTabletWidget>(Tablet->WidgetComponent->GetUserWidgetObject()) : nullptr;
+			
+			if ((TabletWidget && TabletWidget->IsTeamViewFocused()) || !CurrentViewCharacter)
+			{
+				if (TeamViewWidget->IsVisible())
+					TeamViewWidget->SetVisibility(ESlateVisibility::Collapsed);
+			}
+			else
+			{
+				if (!TeamViewWidget->IsVisible())
+					TeamViewWidget->SetVisibility(ESlateVisibility::HitTestInvisible);
+				
+				// Align to right of screen
+				{
+					FAnchors TopRightAnchor;
+					TopRightAnchor.Minimum = {1.0f, 0.0f};
+					TopRightAnchor.Maximum = {1.0f, 0.0f};
+					
+					TeamViewWidget->SetAnchorsInViewport(TopRightAnchor);
+					TeamViewWidget->SetAlignmentInViewport({1.03f, -0.04f});
+				}
+
+				TeamViewWidget->TickTeamView(DeltaSeconds);
+			}
+		}
+	}
+	
+	// Revive system
+	// Note(Ali): Deprecated until reviving players is a thing
+	/*if (RevivingPlayer)
+	{
+		if (LastInteractableComponent == RevivingPlayer->InteractableComponent)
+		{
+			if (!LastInteractableComponent->CanInteract())
+			{
+				StopReviving(RevivingPlayer);
+			}
+			else
+			{
+				RevivingOperatingTime += DeltaSeconds;
+				RevivingPlayer->InteractableComponent->CurrentProgress = FMath::GetMappedRangeValueClamped({0.0f, CharacterHealth->GetReviveOperatingTime()}, {0.0f, 1.0f}, RevivingOperatingTime);
+
+				// Done reviving?
+				if (RevivingOperatingTime >= CharacterHealth->GetReviveOperatingTime())
+				{
+					Server_OnReviveComplete(RevivingPlayer);
+					OnReviveComplete(RevivingPlayer);
+				}
+			}
+		}
+		else
+		{
+			StopReviving(RevivingPlayer);
+		}
+	}*/
+	
+	// pelvis movement that is applied on fp view for more realistic weight feeling
+	bIsPelvisFPMovementBobActive = CVarEnablePelvisMovementBob.GetValueOnAnyThread() > 0;
+	PelvisFPMovementDamping = CVarPelvisMovementDamping.GetValueOnAnyThread();
+	
+	if (bIsLocallyControlled)
+	{
+		if (bWaitingForDoubleTapMelee)
+		{
+			DoubleTapTimeRemaining -= DeltaSeconds;
+			if (DoubleTapTimeRemaining <= 0.0f)
+			{
+				bWaitingForDoubleTapMelee = false;
+	
+				if (LastInteractableComponent && LastInteractableComponent->CanInteract() && LastInteractableComponent->InputActionNameMatchesAnyValidSlot("Melee"))
+				{
+					Server_MeleeInteract(LastInteractableComponent->GetUseActor(), LastInteractableComponent);
+					LastInteractableComponent->OnInteract(this);
+				}
+			}
+		}
+	}
+	
+	HandleMovement();
+	
+	// assign or map the input stuff again
+	const float ForwardInput = GetCharacterMovement()->GetLastInputVector().X;
+	const float RightInput = GetCharacterMovement()->GetLastInputVector().Y;
+	CurInputVector.X = ForwardInput;
+	CurInputVector.Y = RightInput;
+
+#ifndef RON_NO_SPRINT
+	if (!bWalking)
+	{
+		SCOPE_CYCLE_COUNTER(STAT_CalculateSprintVectorOffset);
+		// calculated here so it's only done max 1x per frame rather than in each call (from FP animgraph, TP animgraph, whereever else)
+		FVector v1 = GetVelocity();
+		v1.Normalize();
+		FVector v2 = GetControlRotation().Vector();
+		if (GetLocalRole() == ROLE_SimulatedProxy)
+		{
+			v2 = ReplicatedControlRotation.Vector();
+		}			
+		v1.Z = 0;
+		v2.Z = 0;
+		SprintVectorOffset = FVector::DotProduct(v1, v2);
+		//GEngine->AddOnScreenDebugMessage(-1, 0.0f, FColor::Yellow, "Sprint Vector Offset Client: " + FString::SanitizeFloat(SprintVectorOffset) + "v2: " + v2.ToString());
+            	
+	}
+#endif
+	
+	
+	if (GetLocalRole() >= ROLE_AutonomousProxy || (IsLocalPlayer() && IsPlayerControlled()))
+	{
+		SCOPE_CYCLE_COUNTER(STAT_LocalPlayerUpdates);
+		
+		if (IsLocalPlayer())
+		{
+			DoLowReadyVolumeTrace();
+	
+			if (TimeUntilNextLowReadyTrace <= 0.0f)
+			{
+				DoLowReadyTrace();
+				TimeUntilNextLowReadyTrace = 1.0f/20.0f;
+			}
+			else
+			{
+				TimeUntilNextLowReadyTrace -= DeltaSeconds;
+			}
+			
+			if (bForceLowReady || bUserLowReady || bIsLowReadyFromVolume)
+			{
+				if (IsAnimationBlocking())
+				{
+					SetLowReady(false, false);
+				}
+				else
+				{
+					// Check the high ready style only on the server!
+					bool bUseHighReadyStyle = false;
+					UBpGameplayHelperLib::LoadLowReadyStyle(bUseHighReadyStyle);
+
+					// See if we should be allowed to use the style in this context
+					bool bAllowStyle = !bForceLowReady && bUserLowReady && !bIsLowReadyFromVolume;
+					SetLowReady(bLowReadyPointUp || (bUseHighReadyStyle && bAllowStyle), true);
+				}
+			}
+			
+			if (!bStartedFadeIn)
+			{
+				PlayInitialCameraFade();
+			}
+        
+			SprintMaxTurnRateLeft = FMath::FInterpConstantTo(SprintMaxTurnRateLeft, 1.0f, DeltaSeconds, 1.0f);
+			SprintMaxTurnRateRight = FMath::FInterpConstantTo(SprintMaxTurnRateRight, 1.0f, DeltaSeconds, 1.0f);
+            	
+			if (IsAnimationBlocking() != bServerIsBlockingAnimationPlaying)
+			{
+				bServerIsBlockingAnimationPlaying = IsAnimationBlocking();
+				Server_UpdateIsBlockingAnimationPlaying(bServerIsBlockingAnimationPlaying);
+			}
+
+			float Offset = UReadyOrNotFunctionLibrary::GetWeaponFOVOffset();
+			if (bIsLeaning && GetEquippedItem())
+			{
+				// fixes any clipping you can see when leaning right
+				Offset += GetEquippedItem()->LeanOffset;
+				Offset = FMath::Max(-6.0f, Offset);
+			}
+			if (Cast<ABallisticsShield>(GetEquippedItem()) && bAiming)
+			{
+				Offset = 0.0f;
+			}
+
+#if !UE_BUILD_SHIPPING
+			//ULog::Number(Offset, "Actual Offset: ");
+			#endif
+			
+			if (bFirstPersonMeshesDirty || LastSetMesh1PDynamicMaterial != GetAppropriateFPMesh()->GetMaterials()[0].MaterialInterface)
+			{
+				DynamicWeaponFovMats.Empty();
+				LastSetAspectRatio = UReadyOrNotFunctionLibrary::GetAspectRatio();
+				LastSetMesh1PDynamicMaterial = GetAppropriateFPMesh()->GetMaterials()[0].MaterialInterface;
+				for (int32 i = 0; i < GetMesh1P()->GetMaterials().Num(); i++)
+				{
+					UMaterialInstanceDynamic* DynMat = GetMesh1P()->CreateAndSetMaterialInstanceDynamicFromMaterial(i, GetMesh1P()->GetMaterial(i));
+					if (DynMat)
+					{
+						DynMat->SetScalarParameterValue("DisableWeaponFOV", bDisableWeaponFOV_FromNotify ? 1.0f : 0.0f);
+						DynMat->SetVectorParameterValue("WeaponOffset", FLinearColor(0.0f, 0.0f, Offset, 0.0f));
+						DynamicWeaponFovMats.AddUnique(DynMat);
+					}
+				}
+
+				// Customization
+				for (UMeshComponent* SkeletalMesh : CustomizationFirstPersonMeshes)
+				{
+					if (!IsValid(SkeletalMesh))
+						continue;
+					
+					int32 MaterialsCount = SkeletalMesh->GetMaterials().Num();
+					for (int32 i = 0; i < MaterialsCount; i++)
+					{
+						UMaterialInstanceDynamic* DynamicMaterial = SkeletalMesh->CreateAndSetMaterialInstanceDynamic(i);
+						if (!DynamicMaterial)
+							continue;
+
+						DynamicMaterial->SetScalarParameterValue("DisableWeaponFOV", 0);
+						DynamicMaterial->SetVectorParameterValue("WeaponOffset", FLinearColor(0.0f, 0.0f, Offset, 0.0f));
+						DynamicWeaponFovMats.AddUnique(DynamicMaterial);
+					}
+				}
+
+				DynamicWeaponFovMats.Append(CustomizationActorMaterials);
+				
+				bFirstPersonMeshesDirty = false;
+			}
+			else
+			{
+				if (UReadyOrNotGameInstance* gi = GetWorld()->GetGameInstance<UReadyOrNotGameInstance>())
+				{
+					float Fov;
+					UBpGameplayHelperLib::GetFoV(Fov);
+
+					if (bAiming && GetFirstPersonCameraComponent())
+					{
+						Fov = GetFirstPersonCameraComponent()->FieldOfView;
+					}
+
+					FVector2D ViewportSize;
+					GetWorld()->GetGameViewport()->GetViewportSize(ViewportSize);
+					
+					float FovRadians = FMath::DegreesToRadians(Fov);
+
+					// Convert to vertical fov using reference aspect ratio then back using viewport size to get corrected fov for ultrawide
+					float VerticalFov = 2.0f * FMath::Atan(FMath::Tan(FovRadians / 2.0f) * (9.0f / 16.0f));
+					float FixedHorizontalFov = 2.0f * FMath::Atan(FMath::Tan(VerticalFov / 2.0f) * (ViewportSize.X / ViewportSize.Y));
+					
+					FixedHorizontalFov = FMath::RadiansToDegrees(FixedHorizontalFov);
+
+					// Tablet has some special logic for trying to make it visible regardless of FOV
+					bool bIsTabletEquipped = GetInventoryComponent()->GetEquippedItem<ATablet>() != nullptr;
+					FixedHorizontalFov = bIsTabletEquipped ? 90.0f : FixedHorizontalFov;
+					
+					float CurrentWeaponFOV = UKismetMaterialLibrary::GetScalarParameterValue(GetWorld(), gi->WeaponFOVMaterialCollection, "WeaponFov");
+					FVector ProjectionDirection = bFreelooking ? FreeLookStartRotation.Vector() : GetControlRotation().Vector();
+					
+					UKismetMaterialLibrary::SetScalarParameterValue(GetWorld(), gi->WeaponFOVMaterialCollection, "DepthScale", ShouldEnableDepthFade() ? 0.2f : 1.0f);
+					UKismetMaterialLibrary::SetScalarParameterValue(GetWorld(), gi->WeaponFOVMaterialCollection, "WeaponFov", FMath::FInterpTo(CurrentWeaponFOV, FixedHorizontalFov, DeltaSeconds, 20.0f));
+					// ##UE5UPGRADE## Combatibility
+					UKismetMaterialLibrary::SetVectorParameterValue(GetWorld(), gi->WeaponFOVMaterialCollection, "ProjectionDirection", FLinearColor(ProjectionDirection));
+					
+					FLinearColor CurrentWeaponOffset = UKismetMaterialLibrary::GetVectorParameterValue(GetWorld(), gi->WeaponFOVMaterialCollection, "WeaponOffset");
+					
+					UKismetMaterialLibrary::SetVectorParameterValue(GetWorld(), gi->WeaponFOVMaterialCollection, "WeaponOffset", FLinearColor(0.0f, 0.0f, FMath::FInterpTo(CurrentWeaponOffset.B, Offset, DeltaSeconds, 7.5f), 0.0f));
+				}
+
+				for (UMaterialInstanceDynamic* DynMat : DynamicWeaponFovMats)
+				{
+					if (DynMat)
+					{
+						DynMat->SetScalarParameterValue("DisableWeaponFov", bDisableWeaponFOV_FromNotify ? 1.0f : 0.0f);
+
+						if (GetWorld())
+						{
+							AReadyOrNotLevelScript* Ls = Cast<AReadyOrNotLevelScript>(GetWorld()->GetLevelScriptActor());
+							// wet level is inverted
+							bool bOutSideInRain = IsOutside() && Ls && Ls->bRaining;
+							float CurrentWetLevel = 0.0f;
+							DynMat->GetScalarParameterValue(FHashedMaterialParameterInfo("WetLevel"), CurrentWetLevel);
+							DynMat->SetScalarParameterValue("WetLevel", UKismetMathLibrary::FInterpTo_Constant(CurrentWetLevel,   bOutSideInRain ? 0.0f : 1.0f, DeltaSeconds, 1.0f));
+						}
+					}
+				}
+			}
+
+			// Global wet level, cheaply add wetness to many characters
+			UReadyOrNotGameInstance* GameInstance = GetWorld()->GetGameInstance<UReadyOrNotGameInstance>();
+			AReadyOrNotLevelScript* LevelScript = Cast<AReadyOrNotLevelScript>(GetWorld()->GetLevelScriptActor());
+			if (LevelScript && GameInstance && GameInstance->GlobalMaterialParameterCollection)
+			{
+				float GlobalWetLevel = 0.0f;
+				GlobalWetLevel = UKismetMaterialLibrary::GetScalarParameterValue(GetWorld(), GameInstance->GlobalMaterialParameterCollection, "WetLevel");
+				
+				bool bOutsideInRain = IsOutside() && LevelScript && LevelScript->bRaining;
+
+				float Rate = bOutsideInRain ? 1.0f / 4.0f : 1.0f / 8.0f;
+				GlobalWetLevel = FMath::FInterpConstantTo(GlobalWetLevel, bOutsideInRain ? 1.0f : 0.0f, DeltaSeconds, Rate);
+				
+				UKismetMaterialLibrary::SetScalarParameterValue(GetWorld(), GameInstance->GlobalMaterialParameterCollection, "WetLevel", GlobalWetLevel);
+			}
+			
+			if (CurrentDynamicWeaponFoVBlendEffectAmount != DesiredDynamicWeaponFoVBlendEffectAmount)
+			{
+				CurrentDynamicWeaponFoVBlendEffectAmount = UKismetMathLibrary::FInterpTo(CurrentDynamicWeaponFoVBlendEffectAmount, DesiredDynamicWeaponFoVBlendEffectAmount, DeltaSeconds, 100.0f);
+				for (int32 i = 0; i < DynamicWeaponFovMats.Num(); i++)
+				{
+					UMaterialInstanceDynamic* DynMat = DynamicWeaponFovMats[i];
+					if (!DynMat)
+						continue;
+
+					DynMat->SetScalarParameterValue("Blend", CurrentDynamicWeaponFoVBlendEffectAmount);
+				}
+			}
+			
+
+			if (bSecondaryUsePressed)
+			{
+				SecondaryUse_Repeat();
+			}
+
+			// TODO: Add back in
+			//DoVaultTraces();
+
+			if (JumpDelayTimer > 0.0f)
+			{
+				JumpDelayTimer -= DeltaSeconds;
+			}
+
+			if (bAiming)
+			{
+				AimTime += DeltaSeconds;
+				if (!bHasPlayedLongAimTimeAnnouncement && AimTime > 60.0f && LastFireAttemptTime > 6.0f)
+				{
+					Server_PlayPVPSpeech("Aiming", GetTeam());
+					bHasPlayedLongAimTimeAnnouncement = true;
+				}
+			}
+			else
+			{
+				bHasPlayedLongAimTimeAnnouncement = false;
+				AimTime = 0.0f;
+			}
+
+			if (bReloadHeld)
+			{
+				ReloadHeldTime += DeltaSeconds;
+				if (ReloadHeldTime > 0.2f)
+				{
+					MagCheck();
+					GetWorld()->GetTimerManager().ClearTimer(ReloadOrMagCheck_Handle);
+					bReloadHeld = false;
+				}
+			}
+
+			if (bShowMagCheckAfterReload && !IsReloading())
+			{
+				bShowMagCheckAfterReload = false;
+
+				ABaseMagazineWeapon* Weapon = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+				if (Weapon)
+				{
+					// Bit hacky if other things besides UI are hooking into the mag check event
+					OnWeaponMagCheck.Broadcast(Weapon);
+				}
+			}
+
+			if (bFireSelectHeld)
+			{
+				FireSelectHeldTime += DeltaSeconds;
+			}
+
+			bool bForceEndFreelook = false;
+			bForceEndFreelook |= IsReloading();
+			bForceEndFreelook |= GetEquippedItem() && !GetEquippedItem()->bFreelookEnabled;
+			
+			if (bFreelooking && bForceEndFreelook)
+			{
+				StopFreeLook();
+			}
+			
+			// Freelook recentering
+			if (!bFreelooking && bEndingFreelookPitch)
+			{
+				const float DeltaInput = FMath::FInterpTo(0.0f, FreeLookCache.Pitch, GetWorld()->GetDeltaSeconds(), 5.0f);
+				FreeLookCache.Pitch -= DeltaInput;
+
+				if (FMath::IsNearlyZero(FreeLookCache.Pitch, 0.001f))
+				{
+					bEndingFreelookPitch = false;
+				}
+			}
+			if (!bFreelooking && bEndingFreelookYaw)
+			{
+				const float DeltaInput = FMath::FInterpTo(0.0f, FreeLookCache.Yaw, GetWorld()->GetDeltaSeconds(), 5.0f);
+				FreeLookCache.Yaw -= DeltaInput;
+
+				if (FMath::IsNearlyZero(FreeLookCache.Yaw, 0.001f))
+				{
+					bEndingFreelookYaw = false;
+				}
+			}
+
+			// tick camera bob stuff
+			TickCameraWeaponBob(DeltaSeconds);
+			Server_UpdateCameraRotationRate(Camera_RotationRate);
+			UBpGameplayHelperLib::GetFoV(DefaultFoV);
+			UBpGameplayHelperLib::GetMouseSensitivity(Sensitivity);
+			UBpGameplayHelperLib::GetMouseInverted(bInvertPitch, bInvertYaw);
+			UBpGameplayHelperLib::GetGamepadLookSensitivity(GamepadLookSensitivity);
+			UBpGameplayHelperLib::GetGamepadAimSensitivity(GamepadAimSensitivity);
+			UBpGameplayHelperLib::GetGamepadInverted(bInvertGamepadVertical, bInvertGamepadHorizontal);
+			UBpGameplayHelperLib::LoadToggleADS(bToggleADSGamepad);
+			UBpGameplayHelperLib::LoadHoldCrouch(bHoldCrouchGamepad);
+			UBpGameplayHelperLib::LoadControlScheme(bUsingAlternateControls);
+			Server_UpdateFreeLookCache(FreeLookCache);
+
+			if (FMODBreathingAudioComp)
+			{
+				if (bIsLocallyControlled)
+				{
+					if (IsDeadOrUnconscious())
+					{
+						FMODBreathingAudioComp->Stop();
+					}
+					// Breath state needs to be monitored
+					if (!FMODBreathingAudioComp->Event)
+					{
+						FMODBreathingAudioComp->SetEvent(BreathingBaseEvent);
+					}
+
+					if (IsSprinting())
+					{
+						ExhaustionLevel += ExhaustionIncreaseRate * DeltaSeconds;
+					}
+					else
+					{
+						ExhaustionLevel -= ExhaustionDissipationRate * DeltaSeconds;
+					}
+					ExhaustionLevel = FMath::Clamp(ExhaustionLevel, 0.0f, 1.0f);
+
+					FearLevel -= FearDissipationRate * DeltaSeconds;
+					FearLevel = FMath::Clamp(FearLevel, 0.0f, 1.0f);
+					if (FearLevel <= 0.00f)
+					{
+						bHasPlayedFearAnnouncement = false;
+					}
+
+					if (ExhaustionLevel >= ExhaustionThreshold)
+					{
+						FMODBreathingAudioComp->SetParameter("BreathingState", 3.0f + ExhaustionLevel);
+					}
+					else if (FearLevel >= FearThreshold)
+					{
+						FMODBreathingAudioComp->SetParameter("BreathingState", 1.0f + FearLevel);
+					}
+					else
+					{
+						FMODBreathingAudioComp->SetParameter("BreathingState", 0.0f);
+					}
+				}
+
+				if (!bIsLocallyControlled && FMODBreathingAudioComp->IsActive())
+				{
+					// If not controlled by the local client, turn off the breathing sound effect
+					FMODBreathingAudioComp->Stop();
+					FMODBreathingAudioComp->Deactivate();
+				}
+				else if (!FMODBreathingAudioComp->IsActive())
+				{
+					// If controlled by the local client and the breathing sound effect is not turned on, turn it on now
+					FMODBreathingAudioComp->Activate();
+					FMODBreathingAudioComp->Play();
+				}
+			}
+			
+			TArray<UAnimMontage*> KeysToRemove;
+			for (auto& cd : AnimMontageCooldown)
+			{
+				cd.Value -= DeltaSeconds;
+				if (cd.Value <= 0.0f)
+				{
+					KeysToRemove.Add(cd.Key);
+				}
+			}
+
+			for (UAnimMontage* key : KeysToRemove)
+			{
+				AnimMontageCooldown.Remove(key);
+			}
+
+			// forcibly limit the player speed whenever they are ADS so no matter what inputs they give they cannot overrule this.
+			if (bAiming)
+			{
+				if (!bWasAiming)
+				{
+					bWasAiming = true;
+				}
+			}
+			// update the walk speed when we finish aiming to the last set run speed once.
+			else if (bWasAiming)
+			{
+				SetMaxRunSpeed(MaxRunSpeedPercent);
+				bWasAiming = false;
+				SetRunSpeed(LastSetRunSpeed);
+			}
+
+			if (GetCharacterMovement())
+			{
+				float MaxWalkSpeedBefore = GetCharacterMovement()->MaxWalkSpeed;
+				HitSpeedMultiplier = FMath::FInterpConstantTo(HitSpeedMultiplier, 1.0f, DeltaSeconds, 0.5f);
+				HitSpeedMultiplier = FMath::Clamp(HitSpeedMultiplier, 0.3f, 1.0f);
+				float PVPSpeedMultiplier = 1.0f;
+				if (GetWorld()->GetGameState<ADefusalGS>())
+				{
+					PVPSpeedMultiplier = 1.3f;
+				}
+
+				// Use this to store current run speeed percent and then half the 'walk' speed if not sprinting
+				//(ie. greater gap between 5 notches of speed & sprinting)
+				float TempCurrentRunSpeedPercent =  bHoldingFastWalk ? 0.4f : 1.0f;
+				if (IsHoldingSprint())
+				{
+					SprintSpeedRampUpMultiplier = FMath::FInterpConstantTo(SprintSpeedRampUpMultiplier, SpeedModifier_SprintMax, DeltaSeconds, SpeedModifier_SprintTime);
+				}
+				else
+				{
+					TempCurrentRunSpeedPercent *= 0.75f;
+					SprintSpeedRampUpMultiplier = 1.0f;
+				}
+
+				float BleedMultiplier = 1.0f;
+				if (BleedComponent->IsBleeding())
+				{
+					BleedMultiplier -= (BleedComponent->GetBleedTime() * 0.1f);
+					BleedMultiplier = FMath::Clamp(BleedMultiplier, 0.25f, 1.0f);
+
+					if(SpeechCooldownMap.Contains("Injury_Hit_RadialBlur") == false && GetPlayerPostProcessing())
+					{
+						GetPlayerPostProcessing()->PlayPostProcessEffect_Name("Injury");
+						SpeechCooldownMap.Add("Injury_Hit_RadialBlur", 3.75f);
+
+						if(GetRONPlayerController())
+							GetRONPlayerController()->ClientStartCameraShake(ForwardShake);
+					}
+						
+				}
+                
+				GetCharacterMovement()->MaxWalkSpeed = GetRunSpeed() * SprintSpeedRampUpMultiplier * HitSpeedMultiplier * TempCurrentRunSpeedPercent * SlowDownSpeedMultiplier * (bRepStunned ? 0.75f : 1.0f) * BleedMultiplier * PVPSpeedMultiplier;
+				GetCharacterMovement()->MaxWalkSpeedCrouched = GetRunSpeed() * SprintSpeedRampUpMultiplier * HitSpeedMultiplier * TempCurrentRunSpeedPercent * SpeedModifier_Crouch * SlowDownSpeedMultiplier * (bRepStunned ? 0.75f : 1.0f) * BleedMultiplier * PVPSpeedMultiplier;
+				if (MaxWalkSpeedBefore != GetCharacterMovement()->MaxWalkSpeed)
+				{
+					SetWalkSpeed(GetCharacterMovement()->MaxWalkSpeed, GetCharacterMovement()->MaxWalkSpeedCrouched);
+				}
+			}
+
+			ApplyRecoil(DeltaSeconds);
+			ApplyFoV(DeltaSeconds);
+			ApplyCameraLocation(DeltaSeconds);
+		}
+	}
+
+	if (!QuickThrowItem)
+	{
+		QuickThrowItem = Cast<ABaseGrenade>(GetInventoryComponent()->GetInventoryItemOfClass(ABaseGrenade::StaticClass()));
+	}
+	else
+	{
+		if (ABaseGrenade* EquippedGrenade = Cast<ABaseGrenade>(GetEquippedItem()))
+		{
+			QuickThrowItem = EquippedGrenade;
+		}
+	}
+
+	if (SpawnProtectionTime > 0.0f)
+	{
+		SpawnProtectionTime -= DeltaSeconds;
+	}
+	
+	if (IsArrested() && IsPlayerControlled())
+	{
+		AZipcuffs* Zipcuffs = Cast<AZipcuffs>(GetInventoryComponent()->GetInventoryItemOfClass(AZipcuffs::StaticClass()));
+		if (Zipcuffs)
+		{
+			FActorSpawnParameters ActorSpawnParameters;
+			ActorSpawnParameters.bNoFail = true;
+			if (!PlacedZipcuffs)
+			{
+				if (IsLocallyControlled() && GetFirstPersonCameraComponent())
+					PlacedZipcuffs = GetWorld()->SpawnActor<APlacedZipcuffs>(SpawnedFPZipcuffsClass, FTransform(), ActorSpawnParameters);
+				else
+					PlacedZipcuffs = GetWorld()->SpawnActor<APlacedZipcuffs>(SpawnedZipcuffsClass, FTransform(), ActorSpawnParameters);
+
+				PlacedZipcuffs->SetOwner(this);
+			}
+
+			if (PlacedZipcuffs)
+			{
+				PlacedZipcuffs->AttachToComponent(IsLocalPlayer() ? GetMesh1P() : GetMesh(), FAttachmentTransformRules::SnapToTargetIncludingScale, Zipcuffs->ZipcuffBone);
+			}
+		}
+		else
+		{
+			FActorSpawnParameters ActorSpawnParameters;
+			ActorSpawnParameters.bNoFail = true;
+			if (!PlacedZipcuffs)
+			{
+				if (SpawnedZipcuffsClass)
+				{
+					if (IsLocallyControlled() && GetFirstPersonCameraComponent())
+						PlacedZipcuffs = GetWorld()->SpawnActor<APlacedZipcuffs>(SpawnedFPZipcuffsClass, FTransform(), ActorSpawnParameters);
+					else
+						PlacedZipcuffs = GetWorld()->SpawnActor<APlacedZipcuffs>(SpawnedZipcuffsClass, FTransform(), ActorSpawnParameters);
+
+					
+					PlacedZipcuffs->SetOwner(this);
+				}
+				else
+				{
+					#if WITH_EDITOR
+					ULog::Error(CUR_CLASS_FUNC + " | Failed to spawn zipcuffs on " + GetName() + "! SpawnedZipcuffsClass is null!");
+					#endif
+				}
+			}
+			else
+			{
+				PlacedZipcuffs->AttachToComponent(IsLocalPlayer() ? GetMesh1P() : GetMesh(), FAttachmentTransformRules::SnapToTargetIncludingScale, ZipcuffBone);
+			}
+		}
+	}
+	else
+	{
+		if (PlacedZipcuffs)
+		{
+			PlacedZipcuffs->Destroy();
+			PlacedZipcuffs = nullptr;
+		}
+	}
+
+	if (injuredSoundDelay > 0.0f)
+	{
+		injuredSoundDelay -= DeltaSeconds;
+	}
+
+	TickTabletLogic(DeltaSeconds);
+	
+	if (GetRONPlayerController())
+	{
+		if (bIsSwatCommandOpen && SwatCommandWidget)
+		{
+			TArray<FKey> SwatCommandKeys;
+			
+			SwatCommandKeys.Add(SwatCommandWidget->GetInputOne());
+			SwatCommandKeys.Add(SwatCommandWidget->GetInputTwo());
+			SwatCommandKeys.Add(SwatCommandWidget->GetInputThree());
+			SwatCommandKeys.Add(SwatCommandWidget->GetInputFour());
+			SwatCommandKeys.Add(SwatCommandWidget->GetInputFive());
+			SwatCommandKeys.Add(SwatCommandWidget->GetInputSix());
+			SwatCommandKeys.Add(SwatCommandWidget->GetInputSeven());
+			SwatCommandKeys.Add(SwatCommandWidget->GetInputEight());
+			SwatCommandKeys.Add(SwatCommandWidget->GetInputNine());
+			SwatCommandKeys.Add(SwatCommandWidget->GetInputBack());
+			for (const FKey& Key : SwatCommandKeys)
+			{
+				if (GetRONPlayerController()->WasInputKeyJustPressed(Key))
+				{
+					SwatCommandWidget->InputKey(Key);
+					bWasSwatCommandKeyPressed = true;
+					break;
+				}
+			}
+		}
+		else
+		{
+			if (!bDisableInventoryInput)
+			{
+				if (!IsCarried() && !IsCarrying())
+				{
+					if (!IsMagCheckPlaying() && !IsFireModeSelectPlaying() && !bItemSelectionLocked)
+					{
+						{
+							uint8 SelectedIndex = 0;
+							for (FItemSelectionGroup& ItemGroup : GetInventoryComponent()->ItemSelectionGroups)
+							{
+								if (GetRONPlayerController()->WasInputKeyJustPressed(UReadyOrNotFunctionLibrary::GetKeyFromInputActionName(ItemGroup.InputActionName)))
+								{
+									ItemGroup.ItemIndex = -1;
+									LastSelectedItemGroupIndex = SelectedIndex;
+									OnItemGroupSelection_Pressed.Broadcast(SelectedIndex, ItemGroup.ItemIndex);
+
+									break;
+								}
+
+								SelectedIndex++;
+							}
+						}
+
+						if (GetInventoryComponent()->ItemSelectionGroups.IsValidIndex(LastSelectedItemGroupIndex))
+						{
+							FItemSelectionGroup* ItemGroup = &GetInventoryComponent()->ItemSelectionGroups[LastSelectedItemGroupIndex];
+							if (ItemGroup)
+							{
+								if (GetRONPlayerController()->IsInputKeyDown(UReadyOrNotFunctionLibrary::GetKeyFromInputActionName(ItemGroup->InputActionName)))
+								{
+									ItemGroup->Items.RemoveAll([&](const TSubclassOf<ABaseItem>& ItemClass)
+									{
+										return !GetInventoryComponent()->HasAnyInventoryItemsOfClass(ItemClass);
+									});
+
+									if (ItemGroup->Items.Num() > 1)
+									{
+										int32 PreviousItemIndex = ItemGroup->ItemIndex;
+
+										// Moved mouse wheel up
+										if (GetInputAxisKeyValue(EKeys::MouseWheelAxis) > 0.0f)
+										{
+											ItemGroup->ItemIndex += 1;
+										}
+										// Moved mouse wheel down
+										else if (GetInputAxisKeyValue(EKeys::MouseWheelAxis) < 0.0f)
+										{
+											ItemGroup->ItemIndex -= 1;
+										}
+
+										ItemGroup->ItemIndex = FMath::Clamp(ItemGroup->ItemIndex, -1, ItemGroup->Items.Num() - 1);
+
+										if (PreviousItemIndex != ItemGroup->ItemIndex)
+											OnItemGroupSelection_ItemChanged.Broadcast(LastSelectedItemGroupIndex, ItemGroup->ItemIndex);
+									}
+									else
+									{
+										ItemGroup->ItemIndex = -1;
+									}
+
+									bItemGroupSelectionHeld = true;
+									OnItemGroupSelection_Held.Broadcast(LastSelectedItemGroupIndex, ItemGroup->ItemIndex);
+								}
+
+								if (GetRONPlayerController()->WasInputKeyJustReleased(UReadyOrNotFunctionLibrary::GetKeyFromInputActionName(ItemGroup->InputActionName)))
+								{
+									ABaseItem* PreviousItem = GetEquippedItem();
+									if (ABaseItem* Item = EquipItemFromGroup_Name(ItemGroup->ItemGroupName, ItemGroup->ItemIndex))
+									{
+										// Update group icon to match with the selected item category 
+										ItemGroup->ItemGroupIcon = Item->Visuals.ItemIcon;
+
+										// Try to swap ammo types if we've already got this weapon selected
+										if (Item == PreviousItem)
+										{
+											SwitchAmmoType();
+										}
+									}
+
+									bItemGroupSelectionHeld = false;
+									OnItemGroupSelection_Released.Broadcast(LastSelectedItemGroupIndex, ItemGroup->ItemIndex);
+
+									ItemGroup->ItemIndex = -1;
+									LastSelectedItemGroupIndex = -1;
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+void APlayerCharacter::PlayInitialCameraFade()
+{
+	if (!GetEquippedItem())
+		return;
+
+	const APlayerController* LocalPlayerController = GetGameInstance() ? GetGameInstance()->GetFirstLocalPlayerController() : nullptr;
+	if (!IsValid(LocalPlayerController))
+		return;
+	
+	if (LocalPlayerController->PlayerCameraManager && LocalPlayerController->GetPawn() == this && LocalPlayerController->GetViewTarget() == this)
+	{
+		
+		if (GetGameTimeSinceCreation() < 1.0f)
+		{
+			LocalPlayerController->PlayerCameraManager->StartCameraFade(1.0f, 1.0f, 0.1f, FLinearColor::Black, true, true);
+		}
+		else if (!bStartedFadeIn)
+		{				
+			ForceFirstDraw();
+			LocalPlayerController->PlayerCameraManager->StartCameraFade(1.0f, 0.0f, 3.0f, FLinearColor::Black, false, false);
+
+			bStartedFadeIn = true;
+		}
+	}
+}
+
+void APlayerCharacter::IssueDefaultCommand()
+{
+	CreateSwatCommandWidgetIfNotExists();
+	
+	if (!SwatCommandWidget)
+		return;
+
+	SwatCommandWidget->IssueDefaultCommand();
+
+	if (USWATManager* SwatManager = USWATManager::Get(this))
+	{
+		OnDefaultCommandIssued.Broadcast(this, SwatManager->CurrentDefaultCommand);
+	}
+}
+
+void APlayerCharacter::ToggleSwatCommandMenu()
+{
+	if (!GetRONPlayerController())
+		return;
+
+	if (bCommandMenuLocked)
+		return;
+
+	CreateSwatCommandWidgetIfNotExists();
+
+	if (!SwatCommandWidget)
+		return;
+
+	if (const AReadyOrNotGameState* GS = GetWorld()->GetGameState<AReadyOrNotGameState>())
+	{
+		if (GS->bInPlanningMenu)
+		{
+			SwatCommandWidget->CloseCommandMenu();
+			return;
+		}
+	}
+	
+	bDisableInventoryInput = false;
+
+	if (!bIsSwatCommandOpen)
+	{
+		SwatCommandWidget->OpenCommandMenu();
+	}
+	else
+	{
+		SwatCommandWidget->CloseCommandMenu();
+	}
+}
+
+void APlayerCharacter::CycleSwatElementNext()
+{
+	CreateSwatCommandWidgetIfNotExists();
+	
+	if (!SwatCommandWidget)
+		return;
+
+	if (bItemGroupSelectionHeld)
+		return;
+
+	SwatCommandWidget->CycleSwatElement(true, true);
+}
+
+void APlayerCharacter::CycleSwatElementPrevious()
+{
+	CreateSwatCommandWidgetIfNotExists();
+	
+	if (!SwatCommandWidget)
+		return;
+
+	if (bItemGroupSelectionHeld)
+		return;
+
+	SwatCommandWidget->CycleSwatElement(false, true);
+}
+
+void APlayerCharacter::SelectElementGold()
+{
+	CreateSwatCommandWidgetIfNotExists();
+	
+	if (!SwatCommandWidget)
+		return;
+	
+	SwatCommandWidget->SetActiveTeamElement(ETeamType::TT_SQUAD);
+}
+
+void APlayerCharacter::SelectElementBlue()
+{
+	CreateSwatCommandWidgetIfNotExists();
+	
+	if (!SwatCommandWidget)
+		return;
+	
+	SwatCommandWidget->SetActiveTeamElement(ETeamType::TT_SERT_BLUE);
+}
+
+void APlayerCharacter::SelectElementRed()
+{
+	CreateSwatCommandWidgetIfNotExists();
+	
+	if (!SwatCommandWidget)
+		return;
+	
+	SwatCommandWidget->SetActiveTeamElement(ETeamType::TT_SERT_RED);
+}
+
+void APlayerCharacter::Server_GiveAIMoveTo_Implementation(ACyberneticCharacter* AI, FVector Location)
+{
+	if (AI)
+	{
+		if (ACyberneticController* AIController = AI->GetCyberneticsController())
+		{
+			AIController->GiveMoveTo(Location, true);
+
+			if (AI->IsOnSWATTeam())
+				AI->PlayRawVO(VO_SWAT_GENERAL::RESPONSE_MOVE_TO);
+		}
+	}
+}
+
+void APlayerCharacter::Server_StopAIMoveTo_Implementation(ACyberneticCharacter* AI)
+{
+	if (AI)
+	{
+		if (ACyberneticController* AIController = AI->GetCyberneticsController())
+		{
+			AIController->FinishActivity(AIController->GetCurrentActivity<UMoveToActivity>(), true, true);
+		}
+	}
+}
+
+void APlayerCharacter::Server_GiveAIMoveToExit_Implementation(ACyberneticCharacter* AI)
+{
+	if (AI)
+	{
+		if (ACyberneticController* AIController = AI->GetCyberneticsController())
+		{
+			if (AI->SurrenderExit(ESurrenderExitType::None))
+			{
+				UActivityManager::GiveActivityTo(AIController->GetMoveToExitActivity(), AI, true, true);
+			}
+		}
+	}
+}
+
+void APlayerCharacter::Server_GiveAITurnAroundOrder_Implementation(ACyberneticCharacter* AI)
+{
+	if (AI)
+	{
+		if (ACyberneticController* AIController = AI->GetCyberneticsController())
+		{
+			// a small chance to perform a fake surrender when told to turn around for an arrest
+			ESurrenderExitType ExitType = AI->DetermineSurrenderExitType();
+			
+			if (AI->IsSuspect() &&
+				FMath::FRand() < AI_CONFIG_GET_FLOAT("ChanceToFakeSurrenderWhenOrderedToTurnAround", 0.05f) &&
+				ExitType == ESurrenderExitType::Gun)
+			{
+				AI->SurrenderExit(AI->DetermineSurrenderExitType());
+			}
+			else
+			{
+				const FVector DirectionToInstigator = (GetActorLocation() - AI->GetActorLocation()).GetSafeNormal();
+
+				float Threshold = 0.25f;
+				const float Dot = FVector::DotProduct(AI->GetActorForwardVector(), DirectionToInstigator);
+				if (Dot > Threshold)
+				{
+					AIController->SetFocalPoint(AI->GetActorLocation() + DirectionToInstigator * -500.0f);
+				}
+			}
+		}
+	}
+}
+
+void APlayerCharacter::CreateSwatCommandWidgetIfNotExists()
+{
+	if (SwatCommandWidget) //|| !USWATManager::Get(this))
+		return;
+	
+	const FWidgetLookupData WidgetData = UBpGameplayHelperLib::GetWidgetDataFromLookupData("SwatCommand");
+	SwatCommandWidget = CreateWidget<USwatCommandWidget>(GetWorld(), WidgetData.WidgetClass);
+	if (SwatCommandWidget)
+	{
+		SwatCommandWidget->AddToViewport(-100);
+		SwatCommandWidget->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+	}
+}
+
+bool APlayerCharacter::CanBeSeenFrom(const FVector& ObserverLocation, FVector& OutSeenLocation, int32& NumberOfLoSChecksPerformed, float& OutSightStrength, const AActor* IgnoreActor, const bool* bWasVisible, int32* UserData) const
+{
+	SCOPE_CYCLE_COUNTER(STAT_CanBeSeenFrom);
+	
+	FCollisionQueryParams CollisionParams = UReadyOrNotFunctionLibrary::CreateCollisionQueryParams(const_cast<APlayerCharacter*>(this), const_cast<AReadyOrNotCharacter*>(Cast<AReadyOrNotCharacter>(IgnoreActor)));
+	CollisionParams.bTraceComplex = true;
+	CollisionParams.AddIgnoredActor(IgnoreActor);
+
+	FVector StartTrace = ObserverLocation;
+	FVector EndTrace = GetFirstPersonCameraComponent()->GetComponentLocation();
+
+	OutSeenLocation = EndTrace;
+	
+	float Accuracy = AI_CONFIG_GET_FLOAT("SightDetectionAccuracy");
+	
+	#ifdef ENHANCED_SIGHT_DETECTION
+	ACyberneticCharacter* AI = Cast<ACyberneticCharacter>(const_cast<AActor*>(IgnoreActor));
+	if (AI && Accuracy > 0)
+	{
+		constexpr uint8 TraceTargets = 4;
+		
+		FName Bones[TraceTargets];
+		Bones[0] = "head_end";
+		Bones[1] = "head";
+		Bones[2] = "lowerarm_LE";
+		Bones[3] = "lowerarm_RI";
+		
+		float RightOffsets[TraceTargets];
+		RightOffsets[0] = 10.0f;
+		RightOffsets[1] = -10.0f;
+		RightOffsets[2] = 10.0f;
+		RightOffsets[3] = -10.0f;
+		
+		float UpOffsets[TraceTargets];
+		UpOffsets[0] = 10.0f;
+		UpOffsets[1] = 10.0f;
+		UpOffsets[2] = -10.0f;
+		UpOffsets[3] = -10.0f;
+
+		for (uint8 i = 0; i < TraceTargets; ++i)
+		{
+			FName BoneName = Bones[i];
+			
+			if (BoneName == "lowerarm_LE")
+				BoneName = "lowerarm_RI";
+			else if (BoneName == "lowerarm_RI")
+				BoneName = "lowerarm_LE";
+
+			AI->SeenBone = BoneName;
+
+			FVector BoneLocation = GetMesh()->GetBoneLocation(BoneName);
+			FVector ActorLocation = GetActorLocation();
+
+			FVector AIBoneLocation = AI->GetMesh()->GetBoneLocation("head") + GetActorRightVector() * RightOffsets[i] + GetActorUpVector() * UpOffsets[i];
+			FVector AILocation = AI->GetActorLocation();
+
+			StartTrace = FMath::Lerp(AILocation, AIBoneLocation, Accuracy);
+			StartTrace.Z = AIBoneLocation.Z;
+			
+			EndTrace = FMath::Lerp(ActorLocation, BoneLocation, Accuracy);
+			EndTrace.Z = BoneLocation.Z;
+
+			EndTrace += (EndTrace-StartTrace).GetSafeNormal() * 15.0f;
+			
+			NumberOfLoSChecksPerformed++;
+			bool bHit = GetWorld()->LineTraceTestByChannel(StartTrace, EndTrace, ECC_Visibility, CollisionParams);
+			//DrawDebugLine(GetWorld(), StartTrace, EndTrace, bHit ? FColor::Red : FColor::Green, false, GetWorld()->GetDeltaSeconds() + 0.001f);
+			
+			if (!bHit)
+			{
+				NumberOfLoSChecksPerformed++;
+				bHit = GetWorld()->LineTraceTestByChannel(EndTrace + GetActorRightVector() * 5.0f, StartTrace + GetActorRightVector() * 5.0f, ECC_Visibility, CollisionParams);
+				//DrawDebugLine(GetWorld(), EndTrace + GetActorRightVector() * 5.0f, StartTrace + GetActorRightVector() * 5.0f, HeadHitReverse.bBlockingHit ? FColor::Red : FColor::Green, false, 1.0f);
+				return !bHit;
+			}
+		}
+	}
+	else
+	{
+		NumberOfLoSChecksPerformed++;
+		bool bHit = GetWorld()->LineTraceTestByChannel(StartTrace, EndTrace, ECC_Visibility, CollisionParams);
+		//DrawDebugLine(GetWorld(), StartTrace,EndTrace, bHit ? FColor::Red : FColor::Green, false, GetWorld()->GetDeltaSeconds() + 0.001f);
+		
+		// fix one way collisions
+		if (!bHit)
+		{
+			NumberOfLoSChecksPerformed++;
+			bHit = GetWorld()->LineTraceTestByChannel(EndTrace + GetActorRightVector() * 5.0f, StartTrace + GetActorRightVector() * 5.0f, ECC_Visibility, CollisionParams);
+			//DrawDebugLine(GetWorld(), EndTrace + GetActorRightVector() * 5.0f, StartTrace + GetActorRightVector() * 5.0f, HeadHitReverse.bBlockingHit ? FColor::Red : FColor::Green, false, 1.0f);
+			return !bHit;
+		}
+
+		return !bHit;
+	}
+	#else
+	NumberOfLoSChecksPerformed++;
+	bool bHit = GetWorld()->LineTraceTestByChannel(StartTrace, EndTrace, ECC_Visibility, CollisionParams);
+	
+	// fix one way collisions
+	//DrawDebugLine(GetWorld(), StartTrace,EndTrace, HeadHit.bBlockingHit ? FColor::Orange : FColor::Cyan, false, GetWorld()->GetDeltaSeconds() + 0.001f);
+	
+	if (!bHit)
+	{
+		// Add the slightest deviation to the second trace so we dont get picture perfect traces
+		NumberOfLoSChecksPerformed++;
+		bHit = GetWorld()->LineTraceTestByChannel(EndTrace + GetActorRightVector() * 5.0f, StartTrace + GetActorRightVector() * 5.0f, ECC_Visibility, CollisionParams);
+		//DrawDebugLine(GetWorld(), EndTrace + GetActorRightVector() * 5.0f, StartTrace + GetActorRightVector() * 5.0f, HeadHitReverse.bBlockingHit ? FColor::Orange : FColor::Cyan, false, 1.0f);
+		
+		return !bHit;
+	}
+
+	return !bHit;
+	#endif
+
+	return false;
+}
+
+bool APlayerCharacter::IsOutside()
+{
+	Super::IsOutside();
+	if (bCachedIsOutside)
+	{
+		if(IsValid(OutMix) && !bOutMixPlaying && IsLocalPlayer())
+		{
+			UFMODBlueprintStatics::PlayEvent2D(this, OutMix, true);
+			bOutMixPlaying = true;
+		}
+		
+		return true;
+	}
+	if(IsValid(InMix) && bOutMixPlaying  && IsLocalPlayer())
+	{
+		UFMODBlueprintStatics::PlayEvent2D(this, InMix, true);
+		bOutMixPlaying = false;
+	}
+	return false;
+}
+
+bool APlayerCharacter::IsInLightSource(int32& VisibleLightSources, float MinimumLightLevel)
+{
+	VisibleLightSources = 0;
+	//bool bIncludeWorldLightSources;
+
+	AReadyOrNotLevelScript* ls = Cast<AReadyOrNotLevelScript>(GetWorld()->GetLevelScriptActor());
+	if (ls)
+	{
+		if (!ls->bUseDarkness)
+		{
+			return true;
+		}
+
+		if (MinimumLightLevel <= 0.0f)
+		{
+			MinimumLightLevel = ls->MinimumLightIntensityForSource;
+		}
+
+		//bIncludeWorldLightSources = ls->bIncludeWorldLightsAsSources;
+	}
+
+	if (TimeSinceLastLightSourceCheck < 2.0f && LastMinimumLightSourceIntensity == MinimumLightLevel)
+	{
+		VisibleLightSources = LastVisibleLightSources;
+		return bLastIsInLightSource;
+	}
+
+	for (TActorIterator<ALight> It(GetWorld()); It; ++It)
+	{
+		ALight* light = *It;
+		if (light->GetLightComponent()->Intensity < MinimumLightLevel)
+		{
+			// not a bright enough light to consider.
+			continue;
+
+			/*UPointLightComponent* pl = Cast<UPointLightComponent>(light->GetLightComponent());
+			if (pl)
+			{
+				if (UBpGameplayHelperLib::GetDistanceBetweenActors(this, light) > pl->AttenuationRadius)
+				{
+					// too far away from the light for it to be affecting this character...
+					continue;
+				}
+			}
+
+			USpotLightComponent* sl = Cast<USpotLightComponent>(light->GetLightComponent());
+			if (sl)
+			{
+				if (UBpGameplayHelperLib::GetDistanceBetweenActors(this, light) > sl->AttenuationRadius)
+				{
+					// too far away from the light for it to be affecting this character.
+					continue;
+				}
+			}
+
+			// skip all world light sources if we should
+			if (!pl && !sl && !bIncludeWorldLightSources)
+			{
+				continue;
+			}*/
+		}
+
+		if (UBpGameplayHelperLib::HasLineOfSight(this, light))
+		{
+			VisibleLightSources += 1;
+		}
+	}
+
+	LastVisibleLightSources = VisibleLightSources;
+	bLastIsInLightSource = VisibleLightSources > 0;
+	TimeSinceLastLightSourceCheck = 0.0f;
+	LastMinimumLightSourceIntensity = MinimumLightLevel;
+
+	return bLastIsInLightSource;
+}
+
+bool APlayerCharacter::CalculateStopLocation(FVector& OutStopLocation, const FVector& CurrentLocation, const FVector& Velocity, const FVector& Acceleration, float Friction, float BrakingDeceleration, const float TimeStep, const int MaxSimulationIterations /*= 10*/)
+{
+	SCOPE_CYCLE_COUNTER(STAT_CalculateStopLocation);
+	constexpr float MIN_TICK_TIME = 1e-6;
+	if (TimeStep < MIN_TICK_TIME)
+	{
+		return false;
+	}
+	// Apply braking or deceleration
+	const bool bZeroAcceleration = Acceleration.IsZero();
+
+	if ((Acceleration | Velocity) > 0.0f)
+	{
+		return false;
+	}
+
+	BrakingDeceleration = FMath::Max(BrakingDeceleration, 0.f);
+	Friction = FMath::Max(Friction, 0.f);
+	const bool bZeroFriction = (Friction == 0.f);
+	const bool bZeroBraking = (BrakingDeceleration == 0.f);
+
+	if (bZeroAcceleration && bZeroFriction)
+	{
+		return false;
+	}
+
+	FVector LastVelocity = bZeroAcceleration ? Velocity : Velocity.ProjectOnToNormal(Acceleration.GetSafeNormal());
+	LastVelocity.Z = 0;
+
+	FVector LastLocation = CurrentLocation;
+
+	int Iterations = 0;
+	while (Iterations < MaxSimulationIterations)
+	{
+		Iterations++;
+
+		const FVector OldVel = LastVelocity;
+
+		// Only apply braking if there is no acceleration, or we are over our max speed and need to slow down to it.
+		if (bZeroAcceleration)
+		{
+			// subdivide braking to get reasonably consistent results at lower frame rates
+			// (important for packet loss situations w/ networking)
+			float RemainingTime = TimeStep;
+			constexpr float MaxTimeStep = (1.0f / 33.0f);
+
+			// Decelerate to brake to a stop
+			const FVector RevAccel = (bZeroBraking ? FVector::ZeroVector : (-BrakingDeceleration * LastVelocity.GetSafeNormal()));
+			while (RemainingTime >= MIN_TICK_TIME)
+			{
+				// Zero friction uses constant deceleration, so no need for iteration.
+				const float dt = ((RemainingTime > MaxTimeStep && !bZeroFriction) ? FMath::Min(MaxTimeStep, RemainingTime * 0.5f) : RemainingTime);
+				RemainingTime -= dt;
+
+				// apply friction and braking
+				LastVelocity = LastVelocity + ((-Friction) * LastVelocity + RevAccel) * dt;
+
+				// Don't reverse direction
+				if ((LastVelocity | OldVel) <= 0.f)
+				{
+					LastVelocity = FVector::ZeroVector;
+					break;
+				}
+			}
+
+			// Clamp to zero if nearly zero, or if below min threshold and braking.
+			const float VSizeSq = LastVelocity.SizeSquared();
+			if (VSizeSq <= 1.f || (!bZeroBraking && VSizeSq <= FMath::Square(10)))
+			{
+				LastVelocity = FVector::ZeroVector;
+			}
+		}
+		else
+		{
+			FVector TotalAcceleration = Acceleration;
+			TotalAcceleration.Z = 0;
+
+			// Friction affects our ability to change direction. This is only done for input acceleration, not path following.
+			const FVector AccelDir = TotalAcceleration.GetSafeNormal();
+			const float VelSize = LastVelocity.Size();
+			TotalAcceleration += -(LastVelocity - AccelDir * VelSize) * Friction;
+			// Apply acceleration
+			LastVelocity += TotalAcceleration * TimeStep;
+		}
+
+		LastLocation += LastVelocity * TimeStep;
+
+		// Clamp to zero if nearly zero, or if below min threshold and braking.
+		const float VSizeSq = LastVelocity.SizeSquared();
+		if (VSizeSq <= 1.f
+			|| (LastVelocity | OldVel) <= 0.f)
+		{
+			OutStopLocation = LastLocation;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void APlayerCharacter::PossessedBy(AController* NewController)
+{
+	Super::PossessedBy(NewController);
+	
+	if (IsLocalPlayer())
+		DESTROY_COMPONENT(PlayerMarkerComponent);
+	
+	MeshGearSlot->SetSkeletalMesh(nullptr);
+
+	if (bSpawnInventoryItemsOnPossess)
+	{
+		AReadyOrNotGameMode* gm = Cast<AReadyOrNotGameMode>(GetWorld()->GetAuthGameMode());
+		AReadyOrNotPlayerState* ps = Cast<AReadyOrNotPlayerState>(Controller->PlayerState);
+		if (ps && gm && gm->bAllowLoadouts)
+		{
+			OnWeaponFired.RemoveDynamic(ps, &AReadyOrNotPlayerState::IncrementBulletsFired);
+			OnWeaponFired.AddDynamic(ps, &AReadyOrNotPlayerState::IncrementBulletsFired);
+			LastPlayerState = ps;
+			if (ps->bSpawnLoadout)
+			{
+				// pull from the playerstate
+				ps->LastLoadout = ps->ServerSavedLoadout;
+
+				// if loadout still invalid?
+				if (ps->LastLoadout.Primary == nullptr && ps->LastLoadout.Secondary == nullptr)
+				{
+					ps->ServerSavedLoadout = ps->LastLoadout = gm->DefaultLoadoutIfNothingLoaded;
+				}
+
+			    UBpGameplayHelperLib::EquipLoadoutOnPlayer(ps->LastLoadout, this, FLoadoutEquipOptions());
+			}
+
+		}
+		// only allow the inventory items to spawn the first time incase we reposses this pawn
+		bSpawnInventoryItemsOnPossess = false;
+	}
+
+	if (!bCustomizationSpawned)
+	{
+		AReadyOrNotPlayerState* NewPlayerState = Cast<AReadyOrNotPlayerState>(Controller->PlayerState);
+		if (NewPlayerState)
+		{
+			Customization = NewPlayerState->Customization;
+			Customization.SanitizeServer(this);
+			Customization.ApplyCustomizationSkins(this);
+
+			bCustomizationSpawned = true;
+		}
+	}
+	
+	if (GetNetMode() != NM_Standalone)
+	{
+		ScoringComponent->AddToScorePool(AScoringManager::SCORE_NO_OFFICERS_INJURED);
+		ScoringComponent->GiveAllScores(true, false);
+	}
+	
+	Client_PossessedBy(NewController);
+}
+
+void APlayerCharacter::UnPossessed()
+{
+	Super::UnPossessed();
+	
+	// Ported from BP
+	SetActorRotation(GetControlRotation(), ETeleportType::TeleportPhysics);
+}
+
+void APlayerCharacter::Client_PossessedBy_Implementation(AController* NewController)
+{
+	OnClientPossessed.Broadcast(NewController);
+	
+	class APlayerController* PC = Cast<APlayerController>(NewController);
+	if (PC)
+	{
+		PC->ClientSetCameraFade(false);
+
+		if (GetEquippedItem())
+		{
+			GetEquippedItem()->OnOwnerPossessed();
+		}
+
+		CurrentRunSpeedPercent = FMath::Clamp(CurrentRunSpeedPercent, MinWalkSpeedPercent, MaxRunSpeedPercent);
+
+		Server_UpdateLastSetRunSpeed(CurrentRunSpeedPercent);
+		LastSetRunSpeed = MaxRunSpeedPercent;
+		SetRunSpeed(CurrentRunSpeedPercent);
+	}
+
+	AReadyOrNotPlayerState* ps = Cast<AReadyOrNotPlayerState>(GetPlayerState());
+	if (ps)
+	{
+		OnWeaponFired.RemoveDynamic(ps, &AReadyOrNotPlayerState::IncrementBulletsFired);
+		OnWeaponFired.AddDynamic(ps, &AReadyOrNotPlayerState::IncrementBulletsFired);
+		ps->BulletsBlocked = 0;
+		ps->HitsReceived = 0;
+	}
+
+	// Create the character HUD
+	// We need to wait a bit for our loadout to sync or else the HUD displays null information
+	UReadyOrNotFunctionLibrary::StartTimerForCallback(this, &APlayerCharacter::CreateHUDWidget, (ps && ps->Deaths > 0 ? 1.0f : START_MATCH_FADE_TIME), false, false);
+
+	if (PlayerViewActor)
+	{
+		PlayerViewActor->Destroy(true);
+		PlayerViewActor = nullptr;
+	}
+	
+	if (FirstPersonCameraComponent)
+	{
+		PlayerViewActor = GetWorld()->SpawnActor<APlayerViewActor>(PlayerViewActorClass, FirstPersonCameraComponent->GetComponentTransform());
+		if (PlayerViewActor)
+		{
+			PlayerViewActor->SetOwningPlayer(this);
+		}
+	}
+
+	InventoryComp->OnItemEquipped.RemoveAll(this);
+	InventoryComp->OnItemEquipped.AddDynamic(this, &APlayerCharacter::OnItemEquipped);
+	
+	InventoryComp->OnItemHolstered.RemoveAll(this);
+	InventoryComp->OnItemHolstered.AddDynamic(this, &AReadyOrNotCharacter::OnItemHolstered);
+}
+
+void APlayerCharacter::CreateHUDWidget()
+{
+	if (!IsLocalPlayer())
+		return;
+	
+	if (HumanCharacterWidget_V2)
+	{
+		HumanCharacterWidget_V2->RemoveFromParent();
+		HumanCharacterWidget_V2 = nullptr;
+	}
+
+	const FWidgetLookupData WidgetData = UBpGameplayHelperLib::GetWidgetDataFromLookupData("CharacterHUD_V2");
+
+	UHumanCharacterHUD_V2* WidgetInstance = CreateWidget<UHumanCharacterHUD_V2>(GetWorld(), WidgetData.WidgetClass);
+	if (WidgetInstance)
+	{
+		WidgetInstance->AddToViewport(WidgetData.ZOrder);
+		WidgetInstance->SetVisibility(ESlateVisibility::HitTestInvisible);
+		
+		HumanCharacterWidget_V2 = WidgetInstance;
+		
+		if (AReadyOrNotGameState* GS = Cast<AReadyOrNotGameState>(UGameplayStatics::GetGameState(this)))
+			GS->bInPlanningMenu = false;
+			
+		if (AReadyOrNotGameState* GS = UReadyOrNotStatics::GetReadyOrNotGameState())
+			GS->bInPlanningMenu = false;
+	}
+
+	CreateSwatCommandWidgetIfNotExists();
+
+	CreateTeamViewWidget();
+	
+	MagCheckUI = CreateWidget<UUserWidget>(GetWorld(), UBpGameplayHelperLib::GetWidgetData()->MagCheckUI);
+}
+
+void APlayerCharacter::CreateTeamViewWidget()
+{
+	if (!IsLocalPlayer())
+		return;
+
+	if (TeamViewWidget)
+	{
+		TeamViewWidget->RemoveFromParent();
+		TeamViewWidget = nullptr;
+	}
+	
+	const FWidgetLookupData WidgetData = UBpGameplayHelperLib::GetWidgetDataFromLookupData("TeamView");
+
+	UTeamViewWidget* WidgetInstance = CreateWidget<UTeamViewWidget>(GetWorld(), WidgetData.WidgetClass);
+	if (WidgetInstance)
+	{
+		WidgetInstance->AddToViewport(WidgetData.ZOrder);
+		WidgetInstance->SetDesiredSizeInViewport(FVector2D(493.0f, 300.0f));
+		WidgetInstance->SetVisibility(ESlateVisibility::Collapsed);
+		
+		TeamViewWidget = WidgetInstance;
+	}
+}
+
+void APlayerCharacter::Client_OnTakenDamageDetail_Implementation(bool bWasHeadshot, bool bTorsoShot, bool bLeftArm, bool bLeftLeg, bool bRightArm, bool bRightLeg, float DamageTaken, float RemainingHealth, bool bBlockedByArmour, bool bBlockedByHelmet)
+{
+	OnPlayerTakenDamageDetails.Broadcast(bWasHeadshot, DamageTaken, RemainingHealth, bBlockedByArmour, bBlockedByHelmet);
+
+	AReadyOrNotPlayerState* ps = Cast<AReadyOrNotPlayerState>(GetPlayerState());
+	if (ps)
+	{
+		ps->bHeadInjured |= bWasHeadshot;
+		ps->bTorsoInjured |= bTorsoShot;
+		ps->bLeftArmInjured |= bLeftArm;
+		ps->bRightArmInjured |= bRightArm;
+		ps->bLeftLegInjured |= bLeftLeg;
+		ps->bRightLegInjured |= bRightLeg;
+		
+		if (bBlockedByArmour || bBlockedByHelmet)
+		{
+			ps->BulletsBlocked++;
+		}
+		
+		ps->HitsReceived++;
+	}
+}
+
+bool APlayerCharacter::ShouldTakeDamage(const float Damage, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser) const
+{
+	if (!Super::ShouldTakeDamage(Damage, DamageEvent, EventInstigator, DamageCauser))
+		return false;
+
+	// Is spawn protection active?
+	if (const AReadyOrNotGameState* RONGS = Cast<AReadyOrNotGameState>(GetWorld()->GetGameState()))
+	{
+		if (RONGS->bPvPMode && SpawnProtectionTime > 0.0f)
+			return false;
+	}
+	
+	// Is AI a friendly?
+	if (EventInstigator)
+	{
+		if (const ACyberneticCharacter* AI = Cast<ACyberneticCharacter>(EventInstigator->GetPawn()))
+		{
+			TArray<AReadyOrNotCharacter*>* KnownEnemies = nullptr;
+			if (AI->GetCyberneticsController())
+			{
+				KnownEnemies = &AI->GetCyberneticsController()->GetTargetingComp()->KnownEnemies;
+			}
+
+			bool bIsKnownTarget = false;
+			if (KnownEnemies)
+			{
+				for (const AReadyOrNotCharacter* KnownEnemy : *KnownEnemies)
+				{
+					if (KnownEnemy == this)
+					{
+						bIsKnownTarget = true;
+						break;
+					}
+				}
+			}
+
+			if (bIsKnownTarget)
+				return true;
+
+			// Players can be affected by swat stun types, eg flashbang, gas grenades etc
+			bool bIsStunDamage = false;
+			if (Cast<UStunDamage>(DamageEvent.DamageTypeClass->GetDefaultObject()))
+			{
+				bIsStunDamage = true;
+			}
+			
+			if (AI->IsOnSWATTeam() && IsOnSWATTeam() && !bIsStunDamage)
+				return false;
+		}
+	}
+
+	return true;
+}
+
+void APlayerCharacter::Server_TakeDamage_Implementation(float Damage, FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	TakeDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
+}
+
+bool APlayerCharacter::OnTakeDamage(float& Damage, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	const float HealthBefore = GetCurrentHealth();
+	const float BaseDamage = Damage;
+	
+	if (const AReadyOrNotGameState* RONGS = Cast<AReadyOrNotGameState>(GetWorld()->GetGameState()))
+		Damage *= RONGS->GametypeDamageModifier;
+
+	bBlockedByBodyArmor = false;
+	bBlockedByHeadArmor = false;
+
+	FRotator LookAtRotation = UKismetMathLibrary::FindLookAtRotation(GetActorLocation(), DamageCauser->GetActorLocation());
+	LookAtRotation -= GetActorRotation();
+	LastDamageHitAngle = LookAtRotation.Clamp().Yaw;
+
+	UStunDamage* StunDamage = Cast<UStunDamage>(DamageEvent.DamageTypeClass->GetDefaultObject());
+	const UBulletDamageType* BulletDamage = Cast<UBulletDamageType>(DamageEvent.DamageTypeClass->GetDefaultObject());
+	
+	if (const APlacedC2Explosive* C2Explosive = Cast<APlacedC2Explosive>(DamageCauser))
+	{
+		if (C2Explosive->TargetItem)
+		{			
+			const FVector V1 = C2Explosive->GetActorRightVector().GetSafeNormal2D();
+			const FVector V2 = (GetActorLocation() - C2Explosive->GetActorLocation()).GetSafeNormal2D();
+
+			if (FVector::DotProduct(V1, V2) < 0.0f)
+			{
+				ADoor* TargetDoor = Cast<ADoor>(C2Explosive->TargetItem);
+				if (TargetDoor)
+				{
+					const float DistanceToDoor = FVector::Distance(GetActorLocation(), TargetDoor->GetActorLocation());
+					const float KillDistance = TargetDoor->GetDoorKillDistance()[EDoorDamageType::DDT_Blasting];
+					const float StunDistance = TargetDoor->GetDoorStunDistance()[EDoorDamageType::DDT_Blasting];
+
+					if (DistanceToDoor < KillDistance)
+					{
+						Kill();
+					}
+					else if (DistanceToDoor > KillDistance && DistanceToDoor < StunDistance)
+					{
+						StartStun(EStunType::ST_Stung, TargetDoor);
+					}
+				}
+
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	if (StunDamage)
+		TryApplyStunDamage(StunDamage, Damage, DamageEvent, EventInstigator, DamageCauser);
+
+	if (BulletDamage)
+		TryApplyBulletDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
+
+	const bool bHeadHit = IsLimbHit(ELimbType::LT_Head);
+	const bool bRightArmHit = IsLimbHit(ELimbType::LT_RightArm);
+	const bool bLeftArmHit = IsLimbHit(ELimbType::LT_LeftArm);
+	const bool bRightLegHit = IsLimbHit(ELimbType::LT_RightLeg);
+	const bool bLeftLegHit = IsLimbHit(ELimbType::LT_LeftLeg);
+	const bool bBlockedByArmor = bBlockedByBodyArmor || bBlockedByHeadArmor;
+
+	OnPlayerTakenDamageDetails.Broadcast(bHeadHit, Damage, GetCurrentHealth(), bBlockedByArmor, bBlockedByHeadArmor);
+
+	Client_OnTakenDamageDetail(bHeadHit, bBodyHit, bLeftArmHit, bLeftLegHit, bRightArmHit, bRightLegHit, Damage, CharacterHealth->GetCurrentResource(), bBlockedByArmor, bBlockedByHeadArmor);
+	Client_OnPlayerDamage(true, Damage, EventInstigator ? Cast<AReadyOrNotCharacter>(EventInstigator->GetPawn()) : nullptr, DamageCauser);
+	
+	if (EventInstigator && BulletDamage)
+	{
+		APlayerCharacter* Attacker = Cast<APlayerCharacter>(EventInstigator->GetCharacter());
+
+		if (Attacker && Attacker != this)
+		{
+			if (IsOnSameTeam(this, Attacker))
+			{
+				const FString Suffix = Attacker->GetPlayerState() ? " (" + Attacker->GetPlayerState()->GetPlayerName() + ")" : "";
+				FText ScoreText = FText::Format(FText::FromString("{0}{1}"), AScoringManager::PENALTY_FRIENDLY_FIRE, FText::FromString(Suffix));
+				ScoringComponent->GivePenalty(AScoringManager::PENALTY_FRIENDLY_FIRE, true, ScoreText);
+			}
+		}
+	}
+
+	if (GetHealthComponent()->GetHealthStatus() > EPlayerHealthStatus::HS_Healthy)
+	{
+		ScoringComponent->TakeAllScores();
+	}
+
+	#if WITH_EDITOR
+	if (HealthBefore != GetCurrentHealth())
+	{
+		ULog::Number(BaseDamage, "Base Damage: ");
+		ULog::Number(Damage, "Final Damage Applied to " + GetName() + ": ");
+		ULog::Number(CharacterHealth->GetCurrentResource(), GetName() + "'s Current Health: ");
+	}
+	#endif
+
+	return true;
+}
+
+void APlayerCharacter::Multicast_TakeDamage_Implementation(float Damage, FDamageEvent const& DamageEvent, AReadyOrNotCharacter* InstigatorCharacter, AActor* DamageCauser)
+{
+	if (IsDowned())
+	{
+		OnPlayerDowned.Broadcast(this, InstigatorCharacter);
+		OnPlayerDowned.Clear();		
+	}
+	else
+	{
+		Super::Multicast_TakeDamage_Implementation(Damage, DamageEvent, InstigatorCharacter, DamageCauser);
+	}
+}
+
+void APlayerCharacter::RespondToBleedOutDamage()
+{
+	Super::RespondToBleedOutDamage();
+
+	PlayRawVOWithCooldown(VO_SWAT_GENERAL::CALL_PAIN_GRUNT, 1.75f);
+}
+
+bool APlayerCharacter::TryApplyStunDamage(UStunDamage* InStunDamage, float& Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	if (!InStunDamage || !DamageCauser)
+		return false;
+	
+	if (!IsAffectedByDamageType(InStunDamage))
+		return false;
+	
+ 	FVector DamageOrigin = DamageCauser->GetActorLocation();
+	
+ 	FRadialDamageEvent* RadialDamageEvent = (FRadialDamageEvent*)&DamageEvent;
+	if (RadialDamageEvent)
+	{
+		if (!RadialDamageEvent->Origin.IsNearlyZero(0.01f))
+		{
+			DamageOrigin = RadialDamageEvent->Origin;
+		}
+	}
+	
+ 	if (InStunDamage->bMustBeLookingAtDamageCauser && IsPlayerControlled())
+	{
+ 		if (!DamageCauser->WasRecentlyRendered())
+ 			return false;
+
+ 		FCollisionQueryParams QueryParams = GetCollisionQueryParameters();
+ 		QueryParams.AddIgnoredActor(DamageCauser);
+
+ 		TArray<UPrimitiveComponent*> IgnoredComponents;
+ 		DamageCauser->GetComponents(IgnoredComponents);
+ 		QueryParams.AddIgnoredComponents(IgnoredComponents);
+
+ 		FHitResult LOSHit;
+ 		GetWorld()->LineTraceSingleByChannel(LOSHit, DamageOrigin + FVector(0.0, 0.0f, 25.0f), GetMesh()->GetSocketLocation(SOCKET_EYES_VIEW_POINT), ECC_Visibility, QueryParams);
+
+ 		DrawDebugLine(GetWorld(), DamageOrigin + FVector(0.0, 0.0f, 25.0f), GetMesh()->GetSocketLocation(SOCKET_EYES_VIEW_POINT), FColor::Red, true, 5.0f, 0, 1.5f);
+ 		if (LOSHit.bBlockingHit)
+ 			return false;
+	}
+
+	if (InStunDamage->bCausesSuppression)
+	{
+		FSuppressionData Data;
+		Data.Strength = InStunDamage->SuppressionAmount;
+		Data.Origin = DamageOrigin;
+		Data.Direction = (DamageOrigin - GetActorLocation()).GetSafeNormal2D();
+		Data.Distance = FVector::Distance(DamageOrigin, GetActorLocation());
+		Data.Instigator = EventInstigator ? EventInstigator->GetPawn<AReadyOrNotCharacter>() : nullptr;
+		
+		Multicast_InflictSuppression(Data, InStunDamage->SuppressionCameraShake, true);
+	}
+
+	if (InStunDamage->bStunLocksAim)
+	{
+		bStunAimLocked = true;
+	}
+
+	LastMaxMovementSpeedWhileStunned = FMath::Clamp(InStunDamage->MaxMovementSpeedWhenStunned, 0.0f, MaxRunSpeedPercent);
+
+	//float StunDurationModifier = 2.0f;
+
+	InStunDamage->ScriptedStunEvent(this, Damage, DamageEvent, EventInstigator, DamageCauser);
+
+	if (InStunDamage->bCauseHealthDamage)
+	{
+		if (EventInstigator)
+		{
+			if (ACyberneticCharacter* AICharacter = Cast<ACyberneticCharacter>(EventInstigator->GetPawn()))
+			{
+				AICharacter->bHasDamagedSWATTeam = true;
+				AICharacter->ScoringComponent->RevokeAllPenalties();
+			}
+		}
+		
+		//DecreaseHealth(Damage);
+	}
+
+	if (InStunDamage->bPlayAudioWhenHit)
+	{
+		Client_PlayFMODEvent2D(InStunDamage->StunSoundEffect);
+	}
+		
+	UGameplayStatics::PlaySound2D(GetWorld(), InStunDamage->ImpactSound);
+
+	return true;
+}
+
+bool APlayerCharacter::TryApplyBulletDamage(float& Damage, FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	if (Damage <= 0.0f || !DamageCauser)
+	{
+		return false;
+	}
+
+	if (const ABulletProjectile* Bullet = Cast<ABulletProjectile>(DamageCauser))
+	{
+		if (const ABaseWeapon* Weapon = Cast<ABaseWeapon>(Bullet->FiredFromWeapon))
+		{
+			if (FMath::FRandRange(0.0f, 1.0f) < Weapon->DamageSeverityChance)
+			{
+				// don't allow insane values here
+				Damage *= FMath::FRandRange(1.0f, Weapon->DamageSeverityMultiplier);
+			}
+
+			ACyberneticController* CyberneticController = Cast<ACyberneticController>(EventInstigator);
+			if (CyberneticController)
+			{
+				Damage = FMath::Clamp(Damage, 0.0f, FMath::Max(AI_CONFIG_GET_FLOAT("DamageCap", 60.0f), 10.0f));
+			}
+
+			//DecreaseHealth(Damage);
+
+			if (EventInstigator)
+			{
+				if (AReadyOrNotPlayerState* RONPS = EventInstigator->GetPlayerState<AReadyOrNotPlayerState>())
+				{
+					RONPS->BulletsHit++;
+					RONPS->BulletsHitThisLife++;
+				}
+
+				if (APlayerCharacter* PlayerCharacter = Cast<APlayerCharacter>(EventInstigator->GetPawn()))
+				{
+					DamagedByCharacters.Remove(nullptr);
+					DamagedByCharacters.AddUnique(PlayerCharacter);
+				}
+			}
+			
+			PlayRawVO(VO_SWAT_GENERAL::CALL_PAIN_GRUNT);
+			DamagedByWeapons.Remove(nullptr);
+			DamagedByWeapons.AddUnique(Cast<ABaseWeapon>(DamageCauser));
+
+			return true;
+		}
+	}
+	
+	if (DamageEvent.IsOfType(FPointDamageEvent::ClassID))
+	{
+		const FPointDamageEvent* PointDamageEvent = (FPointDamageEvent*)&DamageEvent;
+		
+		if (PointDamageEvent->HitInfo.GetActor() == this)
+		{
+			const FName HitBone = PointDamageEvent->HitInfo.BoneName;
+
+			HitBones.AddUnique(HitBone);
+			LastHitBoneName = HitBone;
+			LastPointDamageHit = PointDamageEvent->HitInfo;
+
+			ACyberneticController* CyberneticController = Cast<ACyberneticController>(EventInstigator);
+			if (CyberneticController)
+			{
+				Damage = FMath::Clamp(Damage, 0.0f, FMath::Max(AI_CONFIG_GET_FLOAT("DamageCap", 70.0f), 10.0f));
+			}
+
+			ApplyDamageToBone(Damage, HitBone, *PointDamageEvent, EventInstigator, DamageCauser);
+			
+			// Determine if the damage came from the front, back, left or right and fire off the appropriate blueprint event
+			if (IsPlayerControlled() && !bBlockedByBodyArmor && !bBlockedByHeadArmor)
+			{
+				Multicast_SpawnBloodEffects(PointDamageEvent->HitInfo, GetWoundSize(DamageCauser), EventInstigator);
+
+				Client_BulletHit(PointDamageEvent->HitInfo);
+				if (UKismetMathLibrary::RandomBoolWithWeight(0.3f))
+				{
+					StartBleeding();
+				}
+				if (IsLocallyControlled())
+				{
+					Client_BulletHit_Implementation(PointDamageEvent->HitInfo);
+				}
+			}
+
+			//if (!bBlockedByBodyArmor && !bBlockedByHeadArmor)
+			//DecreaseHealth(Damage);
+
+			if (EventInstigator)
+			{
+				if (AReadyOrNotPlayerState* RONPS = EventInstigator->GetPlayerState<AReadyOrNotPlayerState>())
+				{
+					RONPS->BulletsHit++;
+					RONPS->BulletsHitThisLife++;
+				}
+
+				if (APlayerCharacter* PlayerCharacter = Cast<APlayerCharacter>(EventInstigator->GetPawn()))
+				{
+					DamagedByCharacters.Remove(nullptr);
+					DamagedByCharacters.AddUnique(PlayerCharacter);
+				}
+
+				if (ACyberneticCharacter* AICharacter = Cast<ACyberneticCharacter>(EventInstigator->GetPawn()))
+				{
+					AICharacter->bHasDamagedSWATTeam = true;
+					AICharacter->ScoringComponent->RevokeAllPenalties();
+				}
+			}
+
+			DamagedByWeapons.Remove(nullptr);
+			DamagedByWeapons.AddUnique(Cast<ABaseWeapon>(DamageCauser));
+
+			OnPlayerHit.Broadcast(Damage, HitBone);
+
+			return true;
+		}
+	}
+	
+	return false;
+}
+
+void APlayerCharacter::ApplyHeadDamage(float& Damage, FPointDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	PlayMontageFromTable("tp_swat_hit_pain_head");
+
+	if (AReadyOrNotPlayerController* RONPC = GetRONPlayerController())
+	{
+		// Gets the offset from the center of the camera and scores it. Values close to 1 we are looking directly at, values close to -1 are behind us.
+		const float ImpactDotProduct = GetFirstPersonCameraComponent() ? FVector::DotProduct(GetFirstPersonCameraComponent()->GetForwardVector(), UKismetMathLibrary::FindLookAtRotation(GetFirstPersonCameraComponent()->GetComponentLocation(), DamageEvent.HitInfo.ImpactPoint).Vector()) : FVector::DotProduct(GetFaceMesh()->GetForwardVector(), UKismetMathLibrary::FindLookAtRotation(GetFaceMesh()->GetComponentLocation(), DamageEvent.HitInfo.ImpactPoint).Vector());
+
+		if (ImpactDotProduct < 0.0f)
+		{
+			RONPC->ClientStartCameraShake(Camera_Hit_Head_Back);
+		}
+		else
+		{
+			RONPC->ClientStartCameraShake(Camera_Hit_Head_Front);
+		}
+	}
+	
+	bBlockedByHeadArmor = false;
+	if (AHeadwear* HeadArmour = GetInventoryComponent()->GetHeadwear())
+	{
+		bBlockedByHeadArmor = HeadArmour->HandleDamage(Damage, DamageEvent, DamageCauser);
+
+		Client_PlayFMODEvent2D(HeadArmour->ArmourHitSoundFirstPerson);
+
+		PlayArmourRelatedEffects(HeadArmour, DamageEvent.HitInfo);
+	}
+
+	if (!bBlockedByHeadArmor)
+	{
+		CharacterHealth->DecreaseLimbTickets(ELimbType::LT_Head, 1);
+	}
+}
+
+void APlayerCharacter::ApplyUpperBodyDamage(float& Damage, FPointDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	Super::ApplyUpperBodyDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
+}
+
+void APlayerCharacter::ApplyLowerBodyDamage(float& Damage, FPointDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	Super::ApplyLowerBodyDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
+}
+
+void APlayerCharacter::ApplyLeftArmDamage(float& Damage, FPointDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	Super::ApplyLeftArmDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
+
+	PlayMontageFromTable("tp_swt_hit_pain_arms");
+
+	if (AReadyOrNotPlayerController* RONPC = GetRONPlayerController())
+	{
+		RONPC->ClientStartCameraShake(Camera_Hit_Arm_L);
+	}
+
+	if (RecoilNerfEffect)
+		Client_ApplyPlayerEffect(RecoilNerfEffect->GetClass(), true);
+}
+
+void APlayerCharacter::ApplyRightArmDamage(float& Damage, FPointDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	Super::ApplyRightArmDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
+
+	PlayMontageFromTable("tp_swt_hit_pain_arms");
+
+	if (AReadyOrNotPlayerController* RONPC = GetRONPlayerController())
+	{
+		RONPC->ClientStartCameraShake(Camera_Hit_Arm_R);
+	}
+
+	if (RecoilNerfEffect)
+		Client_ApplyPlayerEffect(RecoilNerfEffect->GetClass(), true);
+}
+
+void APlayerCharacter::ApplyLeftLegDamage(float& Damage, FPointDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	Super::ApplyLeftLegDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
+
+	PlayMontageFromTable("tp_swt_hit_pain_legs");
+
+	if (AReadyOrNotPlayerController* RONPC = GetRONPlayerController())
+	{
+		RONPC->ClientStartCameraShake(Camera_Hit_Leg_L);
+	}
+}
+
+void APlayerCharacter::ApplyRightLegDamage(float& Damage, FPointDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	Super::ApplyRightLegDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
+
+	PlayMontageFromTable("tp_swt_hit_pain_legs");
+
+	if (AReadyOrNotPlayerController* RONPC = GetRONPlayerController())
+	{
+		RONPC->ClientStartCameraShake(Camera_Hit_Leg_R);
+	}
+}
+
+void APlayerCharacter::ApplyLeftFootDamage(float& Damage, FPointDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	Super::ApplyLeftFootDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
+
+	PlayMontageFromTable("tp_swt_hit_pain_legs");
+
+	if (AReadyOrNotPlayerController* RONPC = GetRONPlayerController())
+	{
+		RONPC->ClientStartCameraShake(Camera_Hit_Leg_L);
+	}
+}
+
+void APlayerCharacter::ApplyRightFootDamage(float& Damage, FPointDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	Super::ApplyRightFootDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
+
+	PlayMontageFromTable("tp_swt_hit_pain_legs");
+	
+	if (AReadyOrNotPlayerController* RONPC = GetRONPlayerController())
+	{
+		RONPC->ClientStartCameraShake(Camera_Hit_Leg_R);
+	}
+}
+
+void APlayerCharacter::ApplyBodyDamage(float& Damage, FPointDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	if (AReadyOrNotPlayerController* RONPC = GetRONPlayerController())
+	{
+		RONPC->ClientStartCameraShake(Camera_Hit_Low);
+	}
+
+	PlayMontageFromTable("tp_swt_hit_pain_belly");
+
+	bBlockedByBodyArmor = false;
+	if (ABaseArmour* Armor = GetInventoryComponent()->GetArmour())
+	{
+		bBlockedByBodyArmor = Armor->HandleDamage(Damage, DamageEvent, DamageCauser);
+
+		if (bBlockedByBodyArmor)
+			Client_PlayFMODEvent2D(Armor->ArmourHitSoundFirstPerson);
+
+		PlayArmourRelatedEffects(Armor, DamageEvent.HitInfo);
+	}
+}
+
+void APlayerCharacter::Multicast_InflictSuppression_Implementation(FSuppressionData SuppressionData, TSubclassOf<ULegacyCameraShake> CameraShake, bool bLessLethal)
+{
+	if (bGodMode)
+		return;
+	
+	// do camera shake
+	if (CameraShake)
+	{
+		Client_PlayScreenShake(CameraShake);
+	}
+
+	if (IsLocallyControlled())
+	{
+		FearLevel += FearSuppressionScale * SuppressionData.Strength;
+		FearLevel = FMath::Clamp(FearLevel, 0.0f, 1.0f);
+		
+		if (FearLevel > 0.6f && !bHasPlayedFearAnnouncement)
+		{
+			bHasPlayedFearAnnouncement = true;
+			Server_PlayPVPSpeech("PlayerUnderFire", GetTeam());
+		}
+	}
+
+	// do screen effects (handled in BP?)
+	OnPlayerSupressed.Broadcast(SuppressionData.Strength);
+}
+
+void APlayerCharacter::Client_BulletHit_Implementation(FHitResult BulletImpact)
+{
+	// Project the direction hit along both the forward and right vectors, and pass along the values of each.
+	const FVector Location = GetActorLocation();
+	const FRotator Rotation = GetControlRotation();
+	//float AxeLength = 40.0f;
+	const FVector Forward = UKismetMathLibrary::GetForwardVector(Rotation);
+	const FVector Right = UKismetMathLibrary::GetRightVector(Rotation);
+	FVector Direction = BulletImpact.ImpactPoint - Location;
+
+	Direction.Normalize();
+
+#if 0
+	DrawDebugLine(GetWorld(), Location, Location + (Forward * AxeLength), FColor::Orange, true, 30.0f, (uint8)'\000', 5.0f);
+	DrawDebugLine(GetWorld(), Location, Location + (Right * AxeLength), FColor::Red, true, 30.0f, (uint8)'\000', 5.0f);
+	DrawDebugLine(GetWorld(), Location, Location + (Direction * AxeLength), FColor::Green, true, 30.0f, (uint8)'\000', 5.0f);
+	DrawDebugSphere(GetWorld(), Location, 10.0f, 12, FColor::Blue, true, 30.0f, (uint8)'\000', 2.0f);
+#endif
+
+	HitDirectionForward = FVector::DotProduct(Direction, Forward);
+	HitDirectionRight = FVector::DotProduct(Direction, Right);
+	OnBulletImpacted.Broadcast(HitDirectionForward, HitDirectionRight);
+}
+
+void APlayerCharacter::OnKilledOrGoneUnconscious()
+{
+	// FIXME: a lot of this needs authority checks...
+	if (FaceMesh)
+	{
+		FaceMesh->SetMasterPoseComponent(GetMesh());
+	}
+
+	if (GetLocalRole() >= ROLE_Authority)
+	{
+		if (LastCharacterMakingArrest)
+		{	// if we were making an arrest on someone, cancel the arrest
+			AZipcuffs* zipcuffs = Cast<AZipcuffs>(LastCharacterMakingArrest->GetEquippedItem());
+			if (zipcuffs)
+			{
+				if (zipcuffs->bArresting)
+				{
+					zipcuffs->Server_ArrestCancelled_Implementation();
+				}
+			}
+		}
+	}
+	
+	if (PerceptionStimuliComp)
+	{
+		PerceptionStimuliComp->UnregisterFromPerceptionSystem();
+	}
+
+	DeactivateVoiceAudioComp();
+
+	if (IsDeadNotUnconscious())
+	{
+		const FString CharacterName = GetInventoryComponent()->GetSpawnedGear().Character ? GetInventoryComponent()->GetSpawnedGear().Character->CharacterName.ToString() : GetPlayerState() ? GetPlayerState()->GetPlayerName() : GetName();
+		const FString Team = (GetTeam() == ETeamType::TT_SUSPECT ? "[Suspect] " : GetTeam() == ETeamType::TT_CIVILIAN ? "[Civilian] " : "");
+		ENQUEUE_INGAMELOG_MESSAGE_ONETIME(TH_LogCharacterDeath, DL_Error, 5.0f, Team + CharacterName + " is dead.");
+	}
+	else if (IsUnconsciousNotDead())
+	{
+		const FString CharacterName = GetInventoryComponent()->GetSpawnedGear().Character ? GetInventoryComponent()->GetSpawnedGear().Character->CharacterName.ToString() : GetPlayerState() ? GetPlayerState()->GetPlayerName() : GetName();
+		const FString Team = (GetTeam() == ETeamType::TT_SUSPECT ? "[Suspect] " : GetTeam() == ETeamType::TT_CIVILIAN ? "[Civilian] " : "");
+		ENQUEUE_INGAMELOG_MESSAGE_ONETIME(TH_LogCharacterUnconscious, DL_Warning, 5.0f, Team + CharacterName + " has gone unconscious.");
+	}
+
+	// Mainly for our BP only stuff like the cloth collider
+	OnKilledOrGoneUnconciousBP();
+
+	if (HumanCharacterWidget_V2)
+		HumanCharacterWidget_V2->SetVisibility(ESlateVisibility::Hidden);
+}
+
+void APlayerCharacter::OnGameEnded_Implementation()
+{
+	if (IsDeadOrUnconscious())
+	{
+		if (!HasBeenReported())
+		{
+			ScoringComponent->GivePenalty(AScoringManager::PENALTY_FAILED_TO_REPORT_DOWNED_OFFICER, false);
+		}
+	}
+	else
+	{
+		if (GetHealthComponent()->GetHealthStatus() > EPlayerHealthStatus::HS_Healthy)
+		{
+			ScoringComponent->TakeScore(FText::FromStringTable("ScoringTable", "NoInjury"));
+			
+		}
+	}
+}
+
+void APlayerCharacter::ReportToTOC_Implementation(AReadyOrNotCharacter* Reporter, bool bPlayAnimation)
+{
+	Super::ReportToTOC_Implementation(Reporter, bPlayAnimation);
+
+	ScoringComponent->GiveAllScores(true);
+	ScoringComponent->DisplayBonuses();
+}
+
+void APlayerCharacter::DeactivateVoiceAudioComp()
+{
+	if (FMODVoiceAudioComp)
+	{
+		FMODVoiceAudioComp->SetVolume(0.0f);
+		FMODVoiceAudioComp->Stop();
+	}
+}
+
+FString APlayerCharacter::MutateVoiceline(const FString& VO)
+{
+	if (UReadyOrNotAISystem::WasRecentlyInCombat(30.0f))
+		return VO;
+
+	return VO + "S"; // stealth
+}
+
+void APlayerCharacter::Multicast_OnKilled_Implementation(FName LastBoneHit, AActor* DamageCauser)
+{
+	Super::Multicast_OnKilled_Implementation(LastBoneHit, DamageCauser);
+
+	AReadyOrNotGameState* gs = Cast<AReadyOrNotGameState>(GetWorld()->GetGameState());
+	if (!gs)
+	{
+		return;
+	}
+	
+	// requires a re-report (maybe they were reported while arrested and now must be reported again while dead)
+	bHasBeenReported = false;
+
+	LastHitBoneName = LastBoneHit;
+
+	if (IsLocalPlayer())
+	{
+		if (gs->bPvPMode)
+		{
+			UFMODBlueprintStatics::PlayEvent2D(GetWorld(), FlatlineEventPvP, true);
+		}
+		else
+		{
+			UFMODBlueprintStatics::PlayEvent2D(GetWorld(), FlatlineEvent, true);
+		}
+	}
+	//UFMODBlueprintStatics::PlayEventAttached(DeathScreamPVP, GetMesh(), NAME_None, FVector::ZeroVector, EAttachLocation::SnapToTarget, true, true, true);
+
+	FMODAudioPropagationComp->PlayEventAttached(DeathScreamPVP, GetMesh(), NAME_None, {});
+
+	if (APlayerCharacter* KilledByPlayer = Cast<APlayerCharacter>(KilledBy))
+	{
+		if (KilledByPlayer != this)
+		{
+			if (IsOnSameTeam(this, KilledByPlayer))
+			{
+				const FString Suffix = KilledByPlayer->GetPlayerState() ? " (" + KilledByPlayer->GetPlayerState()->GetPlayerName() + ")" : "";
+				FText FriendlyFireScoreText = FText::Format(FText::FromString("{0}{1}"), AScoringManager::PENALTY_FRIENDLY_FIRE, FText::FromString(Suffix));
+				FText TeamKillScoreText = FText::Format(FText::FromString("{0}{1}"), AScoringManager::PENALTY_FRIENDLY_TEAM_KILL, FText::FromString(Suffix));
+
+				ScoringComponent->GivePenalty(AScoringManager::PENALTY_FRIENDLY_FIRE, true, FriendlyFireScoreText);
+				ScoringComponent->GivePenalty(AScoringManager::PENALTY_FRIENDLY_TEAM_KILL, true, TeamKillScoreText);
+
+				KilledByPlayer->PlayROEViolateTOCResponse();
+			}
+		}
+	}
+
+	ScoringComponent->TakeAllScores();
+	ScoringComponent->ChangeScoreGroup(AScoringManager::SCORE_REPORT_DOWNED_OFFICER);
+
+	OnKilledOrGoneUnconscious();
+	//OnKilled();
+
+	if (TeamViewWidget)
+	{
+		TeamViewWidget->RemoveFromParent();
+	}
+	
+	if (PlayerMarkerComponent)
+	{
+		PlayerMarkerComponent->SetHiddenInGame(true);
+	}
+
+	if(GetFMODBreathingComp())
+	{
+		GetFMODBreathingComp()->Stop();
+		GetFMODBreathingComp()->Release();
+	}
+}
+
+void APlayerCharacter::OnFullHealth()
+{
+}
+
+void APlayerCharacter::OnLowHealth(float CurrentHealth)
+{
+	Client_PlayFMODEvent2D(CriticalInjuredEvent);
+}
+
+void APlayerCharacter::Server_PrepareForHeal_Implementation()
+{
+	if (BleedComponent)
+		BleedComponent->PrepareHeal();
+}
+
+void APlayerCharacter::Server_FinishHealing_Implementation()
+{
+	if (BleedComponent)
+		BleedComponent->StopBleeding();
+}
+
+void APlayerCharacter::Multicast_PauseAllAnims_Implementation(bool bPaused)
+{
+	if (GetMesh1P())
+	{
+		GetMesh1P()->bPauseAnims = bPaused;
+	}
+	GetFaceMesh()->bPauseAnims = bPaused;
+
+	if (MeshBody1P)
+	{
+		MeshBody1P->bPauseAnims = bPaused;
+	}
+}
+
+void APlayerCharacter::OnEquippedWeaponFire(ABaseMagazineWeapon* Weapon, const bool bServer)
+{
+	Super::OnEquippedWeaponFire(Weapon, bServer);
+
+	PlayWeaponFireAnimation(Weapon, bAiming, bServer);
+
+	if (bServer)
+	{
+		// Do a (very smol) trace to see if we hit a Shot Detection Volume in this area.
+		TArray<FHitResult> Hits;
+		const FVector Start = Weapon->GetBulletSpawn()->GetComponentLocation();
+		const FVector End = Start + (5.0f * Weapon->GetBulletSpawn()->GetForwardVector());
+		GetWorld()->LineTraceMultiByChannel(Hits, Start, End, ECC_BULLETEFFECT);
+
+		for (const FHitResult& Hit : Hits)
+		{
+			if (AShotDetectionVolume* sd = Cast<AShotDetectionVolume>(Hit.GetActor()))
+			{
+				sd->OnShotFired(Weapon, this);
+			}
+		}
+	}
+	else
+	{
+		// Play postprocess effects
+		GetPlayerPostProcessing()->OnFire();
+
+		// Play camera shake effects
+		if (AReadyOrNotPlayerController* PlayerController = GetController<AReadyOrNotPlayerController>())
+		{
+			if (IsLocallyControlled())
+			{
+				PlayerController->ClientStopCameraShake(Weapon->FireCameraShake);
+				PlayerController->ClientStartCameraShake2(Weapon->FireCameraShakeInst, 1.0f);
+			}
+		}
+
+		// Update recoil data
+		RecalculatePendingRecoil(Weapon);
+	}
+
+	OnWeaponFired.Broadcast(Weapon);
+}
+
+void APlayerCharacter::OnEquippedWeaponDryFire(ABaseMagazineWeapon* Weapon, const bool bServer)
+{
+	Super::OnEquippedWeaponDryFire(Weapon, bServer);
+
+	PlayWeaponDryFireAnimation(Weapon, bAiming, bServer);
+}
+
+void APlayerCharacter::PlayWeaponFireAnimation(ABaseMagazineWeapon* Weapon, const bool bIsAiming, const bool bOnlyTP)
+{
+	if (!Weapon || !Weapon->AnimationData)
+		return;
+
+	// override data if we have some kind of grip
+	// we can only have AFG or VFG atm
+	if (Weapon->AnimationData->bOverrideFireAnimForGrip && (Weapon->GetUnderbarrelAnimationType() != EWeaponUnderbarrelAnimationType::WU_None))
+	{
+		UAnimMontage* CurGripBodyFPFireMontage;
+		if (bAiming)
+		{
+			if (Weapon->GetAmmo() <= 1)
+				CurGripBodyFPFireMontage = (Weapon->GetUnderbarrelAnimationType() == EWeaponUnderbarrelAnimationType::WU_AFG) ? Weapon->AnimationData->Grip_AFG_Body_FP_Fire_Aim_Last : Weapon->AnimationData->Grip_VFG_Body_FP_Fire_Aim_Last;
+			else
+				CurGripBodyFPFireMontage = (Weapon->GetUnderbarrelAnimationType() == EWeaponUnderbarrelAnimationType::WU_AFG) ? Weapon->AnimationData->Grip_AFG_Body_FP_Fire_Aim : Weapon->AnimationData->Grip_VFG_Body_FP_Fire_Aim;
+		}
+		else
+		{
+			if (Weapon->GetAmmo() <= 1)
+				CurGripBodyFPFireMontage = (Weapon->GetUnderbarrelAnimationType() == EWeaponUnderbarrelAnimationType::WU_AFG) ? Weapon->AnimationData->Grip_AFG_Body_FP_Fire_Last : Weapon->AnimationData->Grip_VFG_Body_FP_Fire_Last;
+			else
+				CurGripBodyFPFireMontage = (Weapon->GetUnderbarrelAnimationType() == EWeaponUnderbarrelAnimationType::WU_AFG) ? Weapon->AnimationData->Grip_AFG_Body_FP_Fire : Weapon->AnimationData->Grip_VFG_Body_FP_Fire;
+		}
+
+		Play1PMontage(CurGripBodyFPFireMontage);
+		return;
+	}
+
+	Super::PlayWeaponFireAnimation(Weapon, bIsAiming, bOnlyTP);
+}
+
+void APlayerCharacter::PlayWeaponDryFireAnimation(ABaseMagazineWeapon* Weapon, const bool bIsAiming, const bool bOnlyTP)
+{
+	Super::PlayWeaponDryFireAnimation(Weapon, bIsAiming, bOnlyTP);
+}
+
+void APlayerCharacter::RecalculatePendingRecoil(ABaseMagazineWeapon* Weapon)
+{
+	if (!Weapon)
+		return;
+
+	if (Weapon->RecentShotsFired == 0)
+	{
+		AccumulatedPendingRecoil = FRotator::ZeroRotator;
+	}
+
+	RecoilSpeed = Weapon->RecoilInterpSpeed;
+	
+	FRotator Recoil = Weapon->CalculateRecoil();
+	Recoil *= bAiming ? Weapon->ADSRecoilMultiplier : 1.0f;
+	
+	PendingRecoil += Recoil * FMath::Clamp(CurrentRunSpeedPercent, 0.5f, 1.0f);
+}
+
+void APlayerCharacter::UpdatePictureInPictureVisibility()
+{
+	if (!IsLocallyControlled())
+	{
+		return;
+	}
+
+	for (int32 i = 0; i < GetInventoryComponent()->GetInventoryItems().Num(); i++)
+	{
+		ABaseWeapon* Weapon = Cast<ABaseWeapon>(GetInventoryComponent()->GetInventoryItems()[i]);
+		if (!Weapon || !Weapon->ScopeAttachment)
+		{
+			continue;
+		}
+		
+		Weapon->ScopeAttachment->bNeedInventoryUpdate = true;
+	}
+}
+
+void APlayerCharacter::FadeToBlackEnable()
+{
+	APlayerController* MyPC =UBpGameplayHelperLib::GetLocalPlayerController(GetWorld());
+
+	if (MyPC)
+	{
+		MyPC->ClientSetCameraFade(true, FColor::Black, FVector2D(0.0, 1.0), 0.40f);
+	}
+
+}
+
+void APlayerCharacter::FadeToBlackDisable()
+{
+	APlayerController* MyPC =UBpGameplayHelperLib::GetLocalPlayerController(GetWorld());
+
+	if (MyPC)
+	{
+		MyPC->ClientSetCameraFade(true, FColor::Black, FVector2D(1.0, 0.0), 0.40f);
+	}
+}
+
+void APlayerCharacter::Server_RemoveLadder_Implementation(class ATelescopicLadder* Ladder)
+{
+	if (Ladder)
+	{
+		Ladder->Server_RemoveLadder_Implementation();
+	}
+}
+
+void APlayerCharacter::StartFreeLook()
+{
+	FreeLookStartRotation = GetControlRotation();
+	bFreelooking = true;
+}
+
+void APlayerCharacter::StopFreeLook()
+{
+	if (bFreelooking)
+	{
+		bEndingFreelookPitch = true;
+		bEndingFreelookYaw = true;
+	}
+	
+	bFreelooking = false;
+}
+
+bool APlayerCharacter::IsFreelooking() const
+{
+	return bFreelooking;
+}
+
+void APlayerCharacter::ClampFreelookRotation()
+{
+	FreeLookCache.Normalize();
+	
+	if (FreeLookCache.Pitch > FreelookSetting.PitchMax)
+	{
+		FreeLookCache.Pitch = FreelookSetting.PitchMax;
+	}
+	if (FreeLookCache.Pitch < FreelookSetting.PitchMin)
+	{
+		FreeLookCache.Pitch = FreelookSetting.PitchMin;
+	}
+	if (FreeLookCache.Yaw > FreelookSetting.YawMax)
+	{
+		FreeLookCache.Yaw = FreelookSetting.YawMax;
+	}
+	if (FreeLookCache.Yaw < FreelookSetting.YawMin)
+	{
+		FreeLookCache.Yaw = FreelookSetting.YawMin;
+	}
+	
+	FRotator ControlRotation = GetControlRotation();
+	ControlRotation.Normalize();
+	
+	// Ensure that pitched free look cannot exceed overall camera pitch limits
+	float CameraPitch = ControlRotation.Pitch;
+	float FinalPitch = FMath::Clamp(FreeLookCache.Pitch + CameraPitch, -72.0f, 80.0f) - CameraPitch;
+
+	FreeLookCache.Pitch = FinalPitch;
+}
+
+void APlayerCharacter::Server_UpdateFreeLookCache_Implementation(FRotator NewFreeLookCache)
+{
+	FreeLookCache = NewFreeLookCache;
+}
+
+void APlayerCharacter::GetActorEyesViewPoint(FVector& OutLocation, FRotator& OutRotation) const
+{
+	OutLocation = GetMesh()->GetSocketLocation(SOCKET_EYES_VIEW_POINT);
+	OutRotation = GetViewRotation();
+}
+
+void APlayerCharacter::ToggleFreeLook()
+{
+	if (bUsingAlternateControls && !bGamepadADSActive)
+	{
+		if (bFreelooking)
+		{
+			StopFreeLook();
+		}
+		else
+		{
+			StartFreeLook();
+		}
+	}
+}
+
+bool APlayerCharacter::CanYell() const
+{
+	const bool bSuperCanYell = Super::CanYell();
+
+	if (!bSuperCanYell)
+		return false;
+
+	//ULog::Info("trying to yell");
+	//LOG_NUMBER(FirstPersonCameraComponent->GetComponentRotation().Pitch);
+	
+	if (FirstPersonCameraComponent->GetComponentRotation().Pitch < -40.0f)
+	{
+		FHitResult Hit;
+		const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, FirstPersonCameraComponent->GetComponentLocation(), FirstPersonCameraComponent->GetComponentLocation() + FirstPersonCameraComponent->GetComponentRotation().Vector() * 300.0f, ECC_WorldStatic, GetCollisionQueryParameters());
+		
+		return !bHit;
+	}
+
+	if (bIsLowReadyFromWall)
+		return false;
+
+	return true;
+}
+
+void APlayerCharacter::Server_PlaySound_Implementation(USoundCue* Cue)
+{
+	Multicast_PlaySound(Cue);
+}
+
+void APlayerCharacter::Multicast_PlaySound_Implementation(USoundCue* Cue)
+{
+	if (IsDeadOrUnconscious())
+		return;
+
+	if (GetAudioComp())
+	{
+		USoundData::SpawnSoundAttached(Cue, GetFirstPersonCameraComponent(), IsLocalPlayer() ? false : true);
+	}
+	
+}
+
+FHitResult APlayerCharacter::GetHitFromCamera(float MaxDistance, TArray<TEnumAsByte<ECollisionChannel>> CollisionChannels, FRotator OffsetRotation, FVector OffsetVector, bool bDrawTrace)
+{
+	const FVector StartTrace = GetFirstPersonCameraComponent() ? GetFirstPersonCameraComponent()->GetComponentLocation() + OffsetVector : GetActorLocation() + OffsetVector;
+	const FVector EndTrace = StartTrace + (GetControlRotation() + OffsetRotation).Vector() * MaxDistance;
+
+	FCollisionObjectQueryParams CollisionObjectQuery;
+	for (int32 i = 0; i < CollisionChannels.Num(); i++)
+	{
+		CollisionObjectQuery.AddObjectTypesToQuery(CollisionChannels[i]);
+	}
+
+	// Do a line trace from center of screen to where we are looking, if it hits a weapon pick it up 
+	FHitResult HitResult;
+	GetWorld()->LineTraceSingleByObjectType(HitResult, StartTrace, EndTrace, CollisionObjectQuery, GetCollisionQueryParameters());
+
+	if (bDrawTrace)
+	{
+		DrawDebugLine(GetWorld(), StartTrace, EndTrace, FColor::Red, false, 2.0f, 0, 3.0f);
+	}
+	
+	return HitResult;
+}
+
+void APlayerCharacter::Server_ChangeMesh_Implementation(USkeletalMesh * FPMesh /*= nullptr*/, USkeletalMesh * TPMesh /*= nullptr*/, USkeletalMesh* TPHeadMesh)
+{
+
+	OnRep_MeshReplicated();
+}
+
+bool APlayerCharacter::IsAnyAnimationPlaying()
+{
+	if (GetMesh1P() && GetMesh1P()->GetAnimInstance() && GetMesh1P()->GetAnimInstance()->IsAnyMontagePlaying())
+		return true;
+
+	return false;
+}
+
+void APlayerCharacter::ApplyRecoil(const float DeltaSeconds)
+{
+	if (!GetRONPlayerController())
+	 return;
+	bool bReturnRecoil = false;
+	float RecoilReturnRate = 2.5f;
+	
+	if (const ABaseWeapon* BW = Cast<ABaseWeapon>(GetEquippedItem()))
+	{
+		bReturnRecoil = BW->bReturnRecoil;
+		RecoilReturnRate = BW->RecoilReturnInterpSpeed;
+	}
+	
+	FRotator RecoilDeltaRot;
+	if (bReturnRecoil)
+	{
+		RecoilDeltaRot = UKismetMathLibrary::REase(FRotator::ZeroRotator, PendingRecoil, RecoilReturnRate * DeltaSeconds, false, EEasingFunc::EaseInOut, 1.0f);
+		PendingRecoil -= RecoilDeltaRot;
+	}
+	else
+	{
+		RecoilDeltaRot = UKismetMathLibrary::REase(FRotator::ZeroRotator, PendingRecoil, 7.0f * DeltaSeconds, false, EEasingFunc::EaseInOut, 1.0f);
+		PendingRecoil -= RecoilDeltaRot;// * 0.5f * FMath::Clamp(RecoilSpeed, 0.01f, 1.0f);
+		AccumulatedPendingRecoil += RecoilDeltaRot;
+	}
+	
+	// Account for mouse movements
+	float DeltaX, DeltaY;
+	GetRONPlayerController()->GetInputMouseDelta(DeltaX, DeltaY);
+
+	AccumulatedPendingRecoil -= FRotator(FMath::Abs(DeltaY), 0.0f, 0.0f);
+	AccumulatedPendingRecoil.Pitch = FMath::Clamp(AccumulatedPendingRecoil.Pitch, 0.0f, AccumulatedPendingRecoil.Pitch);
+	AccumulatedPendingRecoil.Yaw = FMath::Clamp(AccumulatedPendingRecoil.Yaw, 0.0f, AccumulatedPendingRecoil.Yaw);
+
+	if (Controller)
+		Controller->SetControlRotation(GetControlRotation() + RecoilDeltaRot);
+}
+
+void APlayerCharacter::OnMelee_Implementation(AReadyOrNotCharacter* Attacker, FHitResult Hit)
+{
+	AMeleeWeapon* MeleeWeapon = Cast<AMeleeWeapon>(Attacker->GetEquippedItem());
+	if (MeleeWeapon)
+	{
+		TakeDamage(MeleeWeapon->MeleeDamage, FDamageEvent(UDamageType::StaticClass()), Attacker->GetController(), Attacker);
+		if (MeleeWeapon->bApplyBleed)
+		{
+			BleedComponent->StartBleeding();
+		}
+	} else
+	{
+		TakeDamage(25.0f, FDamageEvent(UDamageType::StaticClass()), Attacker->GetController(), Attacker);
+	}
+	Super::OnMelee_Implementation(Attacker, Hit);
+}
+
+void APlayerCharacter::ApplyFoV(const float DeltaSeconds)
+{
+	//if (IsDoingArrest() && UInteractionsData::IsPairedInteractionPlayingOn(this))
+	//{
+	//	GetFirstPersonCameraComponent()->SetFieldOfView(FMath::FInterpTo(GetFirstPersonCameraComponent()->FieldOfView, FMath::Clamp(DefaultFoV, 80.0f, 100.0f), DeltaSeconds, DefaultFovInterpTime));
+	//	return;
+	//}
+	
+	if (bOverrideFov)
+	{
+		GetFirstPersonCameraComponent()->SetFieldOfView(FovOverride);
+		return;
+	}
+
+	float DesiredFOV = DefaultFoV; /* * (1.0f + CurrentRunSpeedPercent * 0.05f)*/
+	
+	if (bAiming && !IsAnimationBlocking())
+	{
+		if (ABaseWeapon* Weapon = Cast<ABaseWeapon>(GetEquippedItem()))
+		{
+			bool bZoomADS = true;
+			UBpGameplayHelperLib::LoadZoomADSSetting(bZoomADS);
+			
+			if (bZoomADS)
+			{
+				if (Weapon->GetScopedAttachment())
+					DesiredFOV *= Weapon->GetScopedAttachment()->PlayerCameraFOVMultiplier;
+				else
+					DesiredFOV *= 0.75f;//Weapon->GetADSZoomMultiplier();
+			}
+
+			GetFirstPersonCameraComponent()->SetFieldOfView(FMath::FInterpTo(GetFirstPersonCameraComponent()->FieldOfView, DesiredFOV, DeltaSeconds, Weapon->GetADSZoomInSpeed()));
+		}
+	}
+	else if (IsSprinting())
+	{
+		GetFirstPersonCameraComponent()->SetFieldOfView(FMath::FInterpTo(GetFirstPersonCameraComponent()->FieldOfView, DesiredFOV * SprintFovFactor, DeltaSeconds, SprintFovInterpTime));
+	}
+	else
+	{
+		GetFirstPersonCameraComponent()->SetFieldOfView(FMath::FInterpTo(GetFirstPersonCameraComponent()->FieldOfView, DesiredFOV, DeltaSeconds, DefaultFovInterpTime));
+	}
+}
+
+void APlayerCharacter::ApplyCameraLocation(float DeltaSeconds)
+{
+	// code moved to calc camera for correct order fixing
+}
+
+void APlayerCharacter::OnRep_RunSpeedUpdate()
+{
+	SetRunSpeed(CurrentRunSpeedPercent);
+}
+
+void APlayerCharacter::SetSlowDownSpeed(float SpeedMultiplier /*= 1.0f*/)
+{
+	SlowDownSpeedMultiplier = SpeedMultiplier;
+}
+
+void APlayerCharacter::EndSlowDownSpeed()
+{
+	SlowDownSpeedMultiplier = 1.0f;
+}
+
+void APlayerCharacter::SetMaxRunSpeed(float newMaxSpeed)
+{
+
+	MaxRunSpeedPercent = newMaxSpeed;
+	if (CurrentRunSpeedPercent > MaxRunSpeedPercent)
+		CurrentRunSpeedPercent = MaxRunSpeedPercent;
+
+	SetWalkSpeed(GetRunSpeed() * CurrentRunSpeedPercent, GetRunSpeed() * CurrentRunSpeedPercent * SpeedModifier_Crouch);
+}
+
+void APlayerCharacter::SetRunSpeed(float newRunSpeed)
+{
+	if (CurrentRunSpeedPercent > MaxRunSpeedPercent)
+		CurrentRunSpeedPercent = MaxRunSpeedPercent;
+	CurrentRunSpeedPercent = newRunSpeed;
+
+	SetWalkSpeed(GetRunSpeed() * CurrentRunSpeedPercent, GetRunSpeed() * CurrentRunSpeedPercent * SpeedModifier_Crouch);
+}
+
+void APlayerCharacter::Server_SetWalkSpeed_Implementation(float newWalkSpeed, float newWalkSpeedCrouch)
+{
+	GetCharacterMovement()->MaxWalkSpeed = newWalkSpeed;
+	GetCharacterMovement()->MaxWalkSpeedCrouched = newWalkSpeedCrouch;
+}
+
+void APlayerCharacter::SetWalkSpeed(float newWalkSpeed, float newWalkSpeedCrouch)
+{
+	Server_SetWalkSpeed(newWalkSpeed, newWalkSpeedCrouch);
+	Client_SetWalkSpeed(newWalkSpeed, newWalkSpeedCrouch);
+}
+
+void APlayerCharacter::Client_SetWalkSpeed_Implementation(float newWalkSpeed, float newWalkSpeedCrouch)
+{
+	GetCharacterMovement()->MaxWalkSpeed = newWalkSpeed;
+	GetCharacterMovement()->MaxWalkSpeedCrouched = newWalkSpeedCrouch;
+}
+
+void APlayerCharacter::Server_UpdateLastSetRunSpeed_Implementation(float newRunSpeed)
+{
+	LastSetRunSpeed = newRunSpeed;
+}
+
+bool APlayerCharacter::Is1PMontagePlaying(UAnimMontage* Montage) const
+{
+	// We never want to check if ANY animation is playing.. just the specific one
+	if (!Montage)
+		return false;
+
+	if (!GetMesh1P())
+		return false;
+
+	if (GetMesh1P()->GetAnimInstance())
+	{
+		if (GetMesh1P()->GetAnimInstance()->Montage_IsPlaying(Montage))
+			return true;
+	}
+
+	return false;
+}
+
+bool APlayerCharacter::IsAny1PMontagePlaying() const
+{
+	if (!GetMesh1P() || !GetMesh1P()->GetAnimInstance())
+		return false;
+	if (GetMesh1P()->GetAnimInstance())
+	{
+		UAnimMontage* Montage = GetMesh1P()->GetAnimInstance()->GetCurrentActiveMontage();
+		if (Montage)
+		{
+			const float Position = GetMesh1P()->GetAnimInstance()->Montage_GetPosition(Montage);
+			const float PlayLength = Montage->GetPlayLength();
+			if (Position <= PlayLength - 0.40f)
+			{
+				return true;
+			}
+		} else
+		{
+			return GetMesh1P()->GetAnimInstance()->Montage_IsPlaying(nullptr);
+		}
+		
+	}
+	return false;
+}
+
+FRotator APlayerCharacter::GetBaseAimRotation() const
+{
+	// If we have a controller, by default we aim at the player's 'eyes' direction
+	// that is by default Controller.Rotation for AI, and camera (crosshair) rotation for human players.
+	FVector POVLoc = FVector::ZeroVector;
+	FRotator POVRot = FRotator::ZeroRotator;
+	if (Controller != nullptr && !InFreeCam())
+	{
+		Controller->GetPlayerViewPoint(POVLoc, POVRot);
+		return POVRot;
+	}
+
+	// If our Pitch is 0, then use RemoteViewPitch
+	if (FMath::IsNearlyZero(POVRot.Pitch))
+	{
+		POVRot.Pitch = RemoteViewPitch;
+		POVRot.Pitch = POVRot.Pitch * 360.f / 255.f;
+		POVRot.Pitch = POVRot.GetNormalized().Pitch;
+	}
+
+	return POVRot;
+}
+
+void APlayerCharacter::HandleMovement()
+{
+	SCOPE_CYCLE_COUNTER(STAT_HandleMovement);
+	const FRotator DeltaRotationSound = RotationAtLastSound - GetActorRotation();
+	const FVector DeltaLocationSound = LocationAtLastSound - GetActorLocation();
+
+	if (FMath::Abs(DeltaLocationSound.X) + FMath::Abs(DeltaLocationSound.Y) > MovementRequiredPerSound)
+	{
+		if (!GetCharacterMovement()->IsFalling())
+		{
+			LocationAtLastSound = GetActorLocation();
+			
+			//SpawnFootstepEffect();
+			
+			float Noiseyness = FMath::GetMappedRangeValueUnclamped(FVector2D(0.0f, 240.0f), FVector2D(0.3f, 1.0f), GetVelocity().Size());
+			if (IsCrouching())
+			{
+				Noiseyness *= 0.75f;
+			}
+
+			float MaxRange = bHoldingFastWalk ? 250.0f : 1000.0f;
+			
+			MaxRange *= Noiseyness;
+			
+			UAISense_Hearing::ReportNoiseEvent(GetWorld(), GetMesh()->GetBoneLocation("spine_3"), Noiseyness, this, MaxRange, "Footstep");
+		}
+	}
+
+	if (FMath::Abs(DeltaRotationSound.Yaw) > RotationRequiredPerSound)
+	{
+		RotationAtLastSound = GetActorRotation();
+		OnTurn();
+	}
+
+	const FVector Velocity = GetActorRotation().UnrotateVector(GetVelocity());
+
+	if (Velocity.Z < -NegativeVelocityRequiredForLandingSound)
+	{
+		bPlayLandingSound = true;
+	}
+	else if (Velocity.Z > -5.0f && bPlayLandingSound)
+	{
+		bPlayLandingSound = false;
+		OnJumpLand();
+		UAISense_Hearing::ReportNoiseEvent(GetWorld(), GetActorLocation(), 0.25f, this, 0.0f, "Falling");
+	}
+}
+
+void APlayerCharacter::Multicast_PlayInjuredScream_Implementation()
+{
+	if (IsDeadNotUnconscious())
+		return;
+
+	if (injuredSoundDelay > 0.0f || (InjuredScreamComponent && InjuredScreamComponent->IsPlaying()))
+	{
+		return;
+	}
+	else
+	{
+		if (CharacterHealth->GetCurrentResource() <= 40.0f && !bHasAnnouncedCriticalCondition)
+		{
+			bHasAnnouncedCriticalCondition = true;
+			Server_PlayPVPSpeech("InCriticalCondition", ETeamType::TT_NONE);
+		}
+		else
+		{
+
+			if (CharacterHealth->GetCurrentResource() < 100.0f)
+			{
+				if (InjuredScreamComponent)
+				{
+					InjuredScreamComponent->DestroyComponent();
+					InjuredScreamComponent = nullptr;
+				}
+				//InjuredScreamComponent = UFMODBlueprintStatics::PlayEventAttached(InjuredScreamPVP, GetMesh(), NAME_None, FVector::ZeroVector, EAttachLocation::SnapToTarget, true, true, true);
+				
+				FMODAudioPropagationComp->PlayEventAttached(InjuredScreamPVP, GetMesh(), NAME_None, {});
+			}
+			else
+			{
+				Server_PlayPVPSpeech("PlayerBecomesInjured", ETeamType::TT_NONE);
+			}
+		}
+		injuredSoundDelay = 5.0f;
+	}
+}
+
+float APlayerCharacter::GetRunSpeed() const
+{
+	if (IsArrested())
+	{
+		return RunSpeed * 0.25f;
+	}
+
+	if (IsLowReady())
+	{
+		return RunSpeed * 1.2f;
+	}
+	
+	float ArmourSpeedMovementMultiplier = 1.0f;
+	if (const ASWATArmour* Armour = Cast<ASWATArmour>(GetInventoryComponent()->GetArmour()))
+	{
+		ArmourSpeedMovementMultiplier = Armour->GetArmourSpeedMultiplier();
+	}
+
+	if (IsStunned())
+	{
+		if (GetEquippedItem())
+		{
+			return RunSpeed * GetEquippedItem()->MovementSpeedMultiplier * ArmourSpeedMovementMultiplier * StunMovementSpeedMultiplier;
+		}
+		else
+		{
+			return RunSpeed * ArmourSpeedMovementMultiplier * StunMovementSpeedMultiplier;
+		}
+	}
+
+	if (GetEquippedItem())
+	{
+		return RunSpeed * GetEquippedItem()->MovementSpeedMultiplier * ArmourSpeedMovementMultiplier;
+	}
+	
+	return RunSpeed * ArmourSpeedMovementMultiplier;
+}
+
+float APlayerCharacter::GetMaxAcceleration() const
+{
+	if (const ASWATArmour* Armour = Cast<ASWATArmour>(GetInventoryComponent()->GetArmour()))
+	{
+		return MaxAcceleration * Armour->GetArmourAccelerationMultiplier();
+	}
+
+	return MaxAcceleration;
+}
+
+bool APlayerCharacter::CanThrowChemlight() const
+{
+	if (IsCarried() || IsCarrying())
+		return false;
+	
+	return HasChemlightsInInventory() && !bActionsLocked && !IsDeadOrUnconscious() && !GetEquippedItem<ABallisticsShield>() && !IsAnimationBlocking();
+}
+
+bool APlayerCharacter::CanUse() const
+{
+	if (UInteractionsData::IsPairedInteractionPlayingOn(this))
+	{
+		//ULog::Info("Can't use. Playing paired interaction");
+		return false;
+	}
+
+	if (bActionsLocked)
+	{
+		//ULog::Info("Can't use. Actions locked");
+		return false;
+	}
+
+	if (bTabletFocused)
+	{
+		//ULog::Info("Can't use. Tablet is focused");
+		return false;
+	}
+	
+	if (IsAnimationBlocking())
+	{
+		//ULog::Info("Can't use. Animation blocking");
+		return false;
+	}
+
+	if (IsDeadOrUnconscious() || IsArrested() || IsInRagdoll())
+	{
+		//ULog::Info("Can't use. Inactive");
+		return false;
+	}
+
+	if (bInDevicesMenu)
+	{
+		//ULog::Info("Can't use. In devices menu");
+		return false;
+	}
+
+	if (IsReloading())
+	{
+		//ULog::Info("Can't use. Reloading");
+		return false;
+	}
+
+	if (IsCarrying() || IsCarried())
+	{
+		//ULog::Info("Can't use. Carry states");
+		return false;
+	}
+	
+	return true;
+}
+
+void APlayerCharacter::Use()
+{
+	if (bCommandInterfaceActive)
+		return;
+	
+	bHoldingUse = true;
+	HoldingUseTime = 0.0f;
+
+	if (bAiming)
+	{
+		Yell();
+		return;
+	}
+
+	if (!CanUse())
+	{
+		return;
+	}
+
+	// If we can heal then execute use on key up not down
+	if (ShouldExecuteUseOnKeyDown())
+	{
+		Execute_Use(false);
+	}
+}
+
+void APlayerCharacter::UseOnly()
+{
+	if (bCommandInterfaceActive)
+		return;
+	
+	bHoldingUse = true;
+	HoldingUseTime = 0.0f;
+
+	if (!CanUse())
+	{
+		return;
+	}
+
+	// If we can heal then execute use on key up not down
+	if (ShouldExecuteUseOnKeyDown())
+	{
+		Execute_Use(true);
+	}
+}
+
+void APlayerCharacter::EndUseOnly()
+{
+	bHoldingUse = false;
+
+	if (bCommandInterfaceActive)
+		return;
+
+	if (CanUse())
+	{
+		if (!ShouldExecuteUseOnKeyDown())
+		{
+			if (HoldingUseTime < 0.25f)
+			{
+				Execute_Use(true);
+			}
+		}
+	}
+
+	Execute_EndUse();
+}
+
+bool APlayerCharacter::ShouldExecuteUseOnKeyDown()
+{
+	return CanUse() && !BleedComponent->CanHeal();
+}
+
+void APlayerCharacter::Execute_Use(bool bUseOnly)
+{
+	if (LastInteractableComponent && LastInteractableComponent->CanInteract(true) && LastInteractableComponent->InputActionNameMatchesAnySlot("Use"))
+	{
+		LastInteractableComponent->OnInteract(this);
+
+		if (IsNetMode(NM_Standalone))
+		{
+			Server_Interact(LastInteractableComponent->GetUseActor(), LastInteractableComponent);
+			return;
+		}
+
+		// If we need to notify the server do it before we interact locally (in case object is destroyed)
+		if (LastInteractableComponent->bExecuteOnServer && !HasAuthority())
+		{
+			Server_Interact(LastInteractableComponent->GetUseActor(), LastInteractableComponent);
+		}
+		
+		// Run interaction locally
+		if (LastInteractableComponent->bClientInteract || HasAuthority())
+		{
+			Execute_Interact(LastInteractableComponent->GetUseActor(), this, LastInteractableComponent);
+		}
+	}
+	else if (!bUseOnly)
+	{
+		Yell();
+	}
+}
+
+void APlayerCharacter::EndUse()
+{
+	bHoldingUse = false;
+
+	if (CanUse())
+	{
+		if (!ShouldExecuteUseOnKeyDown())
+		{
+			if (HoldingUseTime < 0.25f)
+			{
+				Execute_Use(false);
+			}
+		}
+	}
+
+	Execute_EndUse();
+}
+
+void APlayerCharacter::DoubleTapUse()
+{
+	bHoldingUse = false;
+
+	Execute_DoubleTapUse();
+}
+
+void APlayerCharacter::Execute_EndUse()
+{
+	if (LastInteractableComponent)
+	{
+		if (LastInteractableComponent->CanInteract() && LastInteractableComponent->InputActionNameMatchesAnySlot("Use"))
+		{
+			if (IsNetMode(NM_Standalone))
+			{
+				Server_EndInteract(LastInteractableComponent->GetUseActor(), LastInteractableComponent);
+				return;
+			}
+			
+			if (LastInteractableComponent->bClientInteract || HasAuthority())
+			{
+				Execute_EndInteract(LastInteractableComponent->GetUseActor(), this, LastInteractableComponent);
+			}
+			
+			if (LastInteractableComponent->bExecuteOnServer && !HasAuthority())
+			{
+				Server_EndInteract(LastInteractableComponent->GetUseActor(), LastInteractableComponent);
+			}
+		}
+	}
+}
+
+void APlayerCharacter::Execute_DoubleTapUse()
+{
+	if (LastInteractableComponent)
+	{
+		if (LastInteractableComponent->CanInteract() && LastInteractableComponent->InputActionNameMatchesAnySlot("Melee"))
+		{
+			if (IsNetMode(NM_Standalone))
+			{
+				Server_DoubleTapInteract(LastInteractableComponent->GetUseActor(), LastInteractableComponent);
+			}
+			else
+			{
+				if (HasAuthority())
+					Execute_DoubleTapInteract(LastInteractableComponent->GetUseActor(), this, LastInteractableComponent);
+				else
+					Server_DoubleTapInteract(LastInteractableComponent->GetUseActor(), LastInteractableComponent);
+			}
+		}
+	}
+}
+
+void APlayerCharacter::DoLowReadyTrace()
+{
+	if (GetEquippedItem())
+	{
+		if (bTabletFocused)
+			return;
+
+		TArray<AActor*> LowReadyIgnoreTraceActors;
+		LowReadyIgnoreTraceActors.Reserve(50);
+		LowReadyIgnoreTraceActors.Append(GetCollisionIgnoredActors());
+
+		// Ignore all volumes
+		if (const AReadyOrNotLevelScript* LS = Cast<AReadyOrNotLevelScript>(GetWorld()->GetLevelScriptActor()))
+		{
+			LowReadyIgnoreTraceActors.Append((TArray<AActor*>)LS->BlockingVolumesInLevel);
+			LowReadyIgnoreTraceActors.Append((TArray<AActor*>)LS->VisibilityBlockingVolumesInLevel);
+			LowReadyIgnoreTraceActors.Append((TArray<AActor*>)LS->TriggerVolumesInLevel);
+			LowReadyIgnoreTraceActors.Append((TArray<AActor*>)LS->AudioVolumes);
+		}
+	
+		const FVector TraceStart = FirstPersonCameraComponent->GetComponentLocation() + FirstPersonCameraComponent->GetRightVector() * 5.0f;
+		const float DistanceScale = (1.0f - LastNonADSRunSpeedPercent) * -30.0f;
+		//GEngine->AddOnScreenDebugMessage(8875, 1.0f, FColor::White, "Low Ready Trace Distance Scale: " + FString::SanitizeFloat(DistanceScale));
+		const FVector LowReadyTraceEnd = TraceStart + (GetControlRotation().Vector() * (LowReadyTraceDistance + DistanceScale));
+		//GEngine->AddOnScreenDebugMessage(8876, 1.0f, FColor::White, "Low Ready Trace End: " + LowReadyTraceEnd.ToString());
+
+		//float FP_pitch = GetMesh1P()->GetComponentTransform().GetRotation().Rotator().Pitch;
+		const float FP_pitch = FirstPersonCameraComponent->GetComponentTransform().GetRotation().Rotator().Pitch;
+
+		bool bShouldLowReady = false;
+
+		static TArray<TEnumAsByte<EObjectTypeQuery>> ObjectTypes =
+		{
+			UEngineTypes::ConvertToObjectType(ECC_WorldStatic),
+			UEngineTypes::ConvertToObjectType(ECC_WorldDynamic),
+			UEngineTypes::ConvertToObjectType(ECC_DOOR),
+			UEngineTypes::ConvertToObjectType(ECC_Pawn),
+			UEngineTypes::ConvertToObjectType(ECC_Destructible),
+			UEngineTypes::ConvertToObjectType(ECC_PhysicsBody)
+		};
+		
+		const float CapsuleSize = IsLowReady() ? 11.0f : 9.0f;
+
+		FHitResult LowReadyTraceHit;
+		UKismetSystemLibrary::SphereTraceSingleForObjects(GetWorld(), TraceStart, LowReadyTraceEnd, CapsuleSize, ObjectTypes, true, LowReadyIgnoreTraceActors, EDrawDebugTrace::None, LowReadyTraceHit, true);
+	
+		const float LowReadyRange = GetEquippedItem()->GetLowReadyRange();
+		// ##UE5UPGRADE## Compatibility
+		if (const AReadyOrNotCharacter* Character = Cast<AReadyOrNotCharacter>(LowReadyTraceHit.HitObjectHandle.FetchActor()))
+		{
+			bool bDeactivated = false;
+			if (const ACyberneticCharacter* AI = Cast<ACyberneticCharacter>(Character))
+			{
+				bDeactivated = AI->bDeactivated;
+			}
+
+			if (bDeactivated)
+				return;
+			
+			if (Character->IsArrestedOrSurrendered())
+			{
+				LowReadyTraceHit.Distance *= 5.0f;
+
+				// HACK(killo): hack since i dont want to resize the capsule or turn this into a multi trace
+				FVector Direction = (LowReadyTraceHit.TraceEnd - LowReadyTraceHit.TraceStart).GetSafeNormal();
+				// ##UE5UPGRADE## FMath
+				bool bIntersect = FMath::LineSphereIntersection<double>(LowReadyTraceHit.TraceStart, Direction, LowReadyRange, Character->GetActorLocation(), 50.0f);
+				bIntersect |= LowReadyTraceHit.ImpactPoint.Z < Character->GetActorLocation().Z + 35.0f;
+				
+				if (!bIntersect)
+					LowReadyTraceHit.Distance = BIG_DIST;
+			}
+			else
+			{
+				LowReadyTraceHit.Distance *= 1.75f;
+			}
+		}
+		
+		if (LowReadyTraceHit.Distance <= LowReadyRange)
+		{
+			bShouldLowReady = true;
+		}
+
+		bIsLowReadyFromWall = bShouldLowReady;
+
+		if (!LowReadyTraceHit.bBlockingHit || LowReadyTraceHit.GetActor() == GetEquippedItem())
+		{
+			bShouldLowReady = false;
+			LowReadyDistance = BIG_NUMBER;
+		}
+		else
+		{
+			LowReadyDistance = LowReadyTraceHit.Distance;
+		}
+
+		if (!bUserLowReady)
+		{ 
+			if (bShouldLowReady && GetEquippedItem()->bUseLowReady)
+			{
+				// The trace determined that we should low ready - do it
+				if (FP_pitch > GetEquippedItem()->LowReadyPitchThreshold)
+				{
+					if (!bLowReadyPointUp)
+					{
+						SetLowReady(true, true);
+					}
+				}
+				else if (!bLowReadyPointDown)
+				{
+					SetLowReady(false, true);
+				}
+			}
+			else if (bLowReadyPointUp || bLowReadyPointDown)
+			{
+				SetLowReady(false, false);
+			}
+		}
+		else
+		{
+			if (FP_pitch > GetEquippedItem()->LowReadyPitchThreshold && bShouldLowReady)
+			{
+				if (!bLowReadyPointUp)
+				{
+					SetLowReady(true, true);
+				}
+			}
+			else
+			{
+				// Check the high ready style only on the server!
+				bool bUseHighReadyStyle = false;
+				UBpGameplayHelperLib::LoadLowReadyStyle(bUseHighReadyStyle);
+
+				// Check the correct cached ready style based on the user setting
+				if ((!bUseHighReadyStyle && !bLowReadyPointDown) || (bUseHighReadyStyle && !bLowReadyPointUp))
+				{
+					SetLowReady(bUseHighReadyStyle, true);
+				}
+			}
+		}
+	}
+	else
+	{
+		LowReadyDistance = BIG_NUMBER;
+	}
+}
+
+void APlayerCharacter::OnKilled(AReadyOrNotCharacter* InstigatorCharacter)
+{
+	Super::OnKilled(InstigatorCharacter);
+
+	if(IsValid(InstigatorCharacter) && InstigatorCharacter->IsCivilian())
+	{
+		UAchievementStatics::UnlockAchievement(GetWorld(), EAchievement::THE_FOOL);
+	}
+	
+	AActor* DamageCauser = LastDamageEvent.Causer;
+	const AController* EventInstigator = LastDamageEvent.Instigator;
+	
+	if (const ABaseWeapon* Weapon = Cast<ABaseWeapon>(DamageCauser))
+	{
+		if (Weapon->SoundData)
+			UFMODBlueprintStatics::PlayEvent2D(this, Weapon->SoundData->KillMarker, true);
+	}
+	
+	if (const AReadyOrNotGameState* RONGS = Cast<AReadyOrNotGameState>(GetWorld()->GetGameState()))
+	{
+		if (RONGS->bPvPMode)
+		{
+			if (EventInstigator)
+			{
+				if (APlayerCharacter* PC = Cast<APlayerCharacter>(EventInstigator->GetPawn()))
+				{
+					ABaseItem* Weapon = nullptr;
+				
+					if (Cast<ABulletProjectile>(DamageCauser))
+					{
+						if (const ABulletProjectile* Projectile = Cast<ABulletProjectile>(DamageCauser))
+							Weapon = Projectile->FiredFromWeapon;
+					}
+					else if (Cast<ABaseItem>(DamageCauser))
+					{
+						Weapon = Cast<ABaseItem>(DamageCauser);
+					}
+					else if (DamageCauser->GetOwner() && Cast<ABaseItem>(DamageCauser->GetOwner()))
+					{
+						Weapon = Cast<ABaseItem>(DamageCauser->GetOwner());
+					}
+
+					if (AReadyOrNotPlayerState* RONPS = GetPlayerState<AReadyOrNotPlayerState>())
+					{
+						RONPS->bDeadToPointDamage = (FPointDamageEvent*)&LastDamageEvent.DamageEvent != nullptr;
+						RONPS->DeathKiller = PC;
+						RONPS->DeathWeapon = Cast<ABaseMagazineWeapon>(Weapon);
+					}
+
+					Server_KillfeedMessage_Implementation(PC, this, Weapon);
+				}
+			}
+		}
+	}
+}
+
+void APlayerCharacter::Server_SetUserLowReady_Implementation(bool bShouldUserLowReady)
+{
+	bUserLowReady = bShouldUserLowReady;
+}
+
+bool APlayerCharacter::Server_SetUserLowReady_Validate(bool bShouldUserLowReady)
+{
+	return true;
+}
+
+void APlayerCharacter::SetLowReady(bool bUp, bool bLowReady)
+{
+	const bool bCachedLowReadyPointUp = bLowReadyPointUp;
+	const bool bCachedLowReadyPointDown = bLowReadyPointDown;
+	
+	if ((bUserLowReady || bForceLowReady) && !IsAnimationBlocking())
+	{
+		Super::SetLowReady(bUp, true);
+	} 
+	else
+	{
+		Super::SetLowReady(bUp, bLowReady);
+	}
+
+	if (bLowReadyPointUp != bCachedLowReadyPointUp || bLowReadyPointDown != bCachedLowReadyPointDown)
+	{
+		Server_SetLowReady(bUp, bLowReady, bUserLowReady);
+	}
+	
+}
+
+void APlayerCharacter::Server_SetLowReady_Implementation(bool bUp, bool bLowReady, bool bIsUserLowReady)
+{
+	bUserLowReady = bIsUserLowReady;
+	SetLowReady(bUp, bLowReady);
+}
+
+bool APlayerCharacter::Server_SetLowReady_Validate(bool bUp, bool bLowReady, bool bIsUserLowReady)
+{
+	return true;
+}
+
+void APlayerCharacter::OnLowReadyButtonDown()
+{
+	if (IsCarried() || IsCarrying())
+		return;
+	
+	Server_SetUserLowReady(true);
+	bUserLowReady = true;
+}
+
+void APlayerCharacter::OnLowReadyButtonUp()
+{
+	if (IsCarried() || IsCarrying())
+		return;
+	
+	Server_SetUserLowReady(false);
+	bUserLowReady = false;
+}
+
+void APlayerCharacter::ToggleLowReady()
+{
+	if (IsCarried() || IsCarrying())
+		return;
+	
+	if (bUserLowReady)
+	{
+		OnLowReadyButtonUp();
+	}
+	else
+	{
+		OnLowReadyButtonDown();
+	}
+}
+
+void APlayerCharacter::Server_KillfeedMessage_Implementation(APlayerCharacter* Killer, APlayerCharacter* Victim, ABaseItem* Weapon)
+{
+	FRChatMessage ChatMessage;
+	UDataSingleton* Data = UBpGameplayHelperLib::GetRoNData();
+	AReadyOrNotGameState* gs = Cast<AReadyOrNotGameState>(GetWorld()->GetGameState());
+
+	if (!Killer || !Killer->Controller || !Killer->Controller->GetPlayerState<APlayerState>() || !Killer->GetPlayerState<APlayerState>() ||
+		!Victim || !Victim->Controller || !Victim->Controller->GetPlayerState<APlayerState>() || !Victim->GetPlayerState<APlayerState>() ||
+		!Weapon || !Data || !gs)
+	{
+		return;
+	}
+
+	if (gs->bFreeForAll)
+	{
+		ChatMessage.AssociatedTeam = ETeamType::TT_SQUAD;
+		ChatMessage.Color = FLinearColor::Yellow;
+	}
+	else
+	{
+		ChatMessage.AssociatedTeam = Killer->GetTeam();
+		if (Killer->GetTeam() == ETeamType::TT_SERT_RED)
+		{
+			ChatMessage.Color = FLinearColor::Red;
+		}
+		else if (Killer->GetTeam() == ETeamType::TT_SERT_BLUE)
+		{
+			ChatMessage.Color = FLinearColor::Blue;
+		}
+		else
+		{
+			return;
+		}
+	}
+
+	ChatMessage.SenderName = "";
+	ChatMessage.bKillfeed = true;
+	if (gs->bFreeForAll || Killer->GetTeam() != Victim->GetTeam())
+	{
+		ChatMessage.Message = Killer->Controller->PlayerState->GetPlayerName() + " " +
+			Data->KillfeedFormatRandom[FMath::RandRange(0, Data->KillfeedFormatRandom.Num() - 1)].ToString() +
+			" " + Victim->Controller->PlayerState->GetPlayerName() + " " + Data->KillfeedWithA.ToString() + " " +
+			Weapon->ItemName.ToString() + "\n";
+	}
+	else
+	{
+		ChatMessage.Message = Killer->Controller->PlayerState->GetPlayerName() + " " +
+			Data->TeamkillfeedFormatRandom[FMath::RandRange(0, Data->TeamkillfeedFormatRandom.Num() - 1)].ToString() +
+			" " + Victim->Controller->PlayerState->GetPlayerName() + " " + Data->KillfeedWithA.ToString() + " " +
+			Weapon->ItemName.ToString() + "\n";
+	}
+	
+	LocalKillFeed(Killer, Victim, Weapon);
+	//gs->Multicast_BroadcastChatMessage(ChatMessage);
+}
+
+void APlayerCharacter::Server_ArrestfeedMessage_Implementation(APlayerCharacter* Arrester, APlayerCharacter* Victim)
+{
+	FRChatMessage ChatMessage;
+	UDataSingleton* Data = UBpGameplayHelperLib::GetRoNData();
+	AReadyOrNotGameState* gs = Cast<AReadyOrNotGameState>(GetWorld()->GetGameState());
+
+	if (!Arrester || !Arrester->Controller || !Arrester->Controller->GetPlayerState<APlayerState>() || !Arrester->GetPlayerState<APlayerState>() ||
+		!Victim || !Victim->Controller || !Victim->Controller->GetPlayerState<APlayerState>() || !Victim->GetPlayerState<APlayerState>() ||
+		!Data || !gs)
+	{
+		return;
+	}
+
+	if (gs->bFreeForAll)
+	{
+		ChatMessage.Color = FLinearColor::Yellow;
+		ChatMessage.AssociatedTeam = ETeamType::TT_SQUAD;
+	}
+	else if (Arrester->GetTeam() == ETeamType::TT_SERT_RED)
+	{
+		ChatMessage.Color = FLinearColor::Red;
+		ChatMessage.AssociatedTeam = ETeamType::TT_SERT_RED;
+	}
+	else if (Arrester->GetTeam() == ETeamType::TT_SERT_BLUE)
+	{
+		ChatMessage.Color = FLinearColor::Blue;
+		ChatMessage.AssociatedTeam = ETeamType::TT_SERT_BLUE;
+	}
+	else
+	{
+		return;
+	}
+
+	ChatMessage.SenderName = "";
+	ChatMessage.bKillfeed = true;
+	ChatMessage.Message = Arrester->Controller->PlayerState->GetPlayerName() + " " +
+		Data->ArrestfeedFormatRandom[FMath::RandRange(0, Data->ArrestfeedFormatRandom.Num() - 1)].ToString() +
+		" " + Victim->Controller->PlayerState->GetPlayerName();
+
+	LocalArrestFeed(Arrester, Victim);
+	//gs->Multicast_BroadcastChatMessage(ChatMessage);
+}
+
+void APlayerCharacter::Server_FreefeedMessage_Implementation(APlayerCharacter* Freer, APlayerCharacter* Victim)
+{
+	FRChatMessage ChatMessage;
+	UDataSingleton* Data = UBpGameplayHelperLib::GetRoNData();
+	AReadyOrNotGameState* gs = Cast<AReadyOrNotGameState>(GetWorld()->GetGameState());
+
+	if (!Freer || !Freer->Controller || !Freer->Controller->GetPlayerState<APlayerState>() || !Freer->GetPlayerState<APlayerState>() ||
+		!Victim || !Victim->Controller || !Victim->Controller->GetPlayerState<APlayerState>() || !Victim->GetPlayerState<APlayerState>() ||
+		!Data || !gs)
+	{
+		return;
+	}
+
+	if (gs->bFreeForAll)
+	{
+		ChatMessage.Color = FLinearColor::Yellow;
+		ChatMessage.AssociatedTeam = ETeamType::TT_SQUAD;
+	}
+	else if (Freer->GetTeam() == ETeamType::TT_SERT_RED)
+	{
+		ChatMessage.Color = FLinearColor::Red;
+		ChatMessage.AssociatedTeam = ETeamType::TT_SERT_RED;
+	}
+	else if (Freer->GetTeam() == ETeamType::TT_SERT_BLUE)
+	{
+		ChatMessage.Color = FLinearColor::Blue;
+		ChatMessage.AssociatedTeam = ETeamType::TT_SERT_BLUE;
+	}
+	else
+	{
+		return;
+	}
+
+	ChatMessage.SenderName = "";
+	ChatMessage.bKillfeed = true;
+	ChatMessage.Message = Freer->Controller->PlayerState->GetPlayerName() + " " +
+		Data->FreefeedFormatRandom[FMath::RandRange(0, Data->FreefeedFormatRandom.Num() - 1)].ToString() +
+		" " + Victim->Controller->PlayerState->GetPlayerName();
+
+	LocalFreeFeed(Freer, Victim);
+	//gs->Multicast_BroadcastChatMessage(ChatMessage);
+}
+
+void APlayerCharacter::LocalKillFeed_Implementation(APlayerCharacter* Killer, APlayerCharacter* Victim, ABaseItem* Weapon)
+{
+	if (!Victim)
+		return;
+
+	if (!Killer)
+		return;
+
+	if (Killer->IsLocalPlayer())
+	{
+		AReadyOrNotGameState* gs = Cast<AReadyOrNotGameState>(GetWorld()->GetGameState());
+		if (gs)
+		{
+			if (Victim->GetPlayerState())
+			{
+				FKillFeedData kf;
+				kf.Name = Victim->GetPlayerState()->GetPlayerName();
+				kf.Type = EKillfeedType::KT_Kill;
+				gs->KillfeedData.Add(kf);
+			}
+		}
+	}
+}
+
+void APlayerCharacter::LocalArrestFeed_Implementation(APlayerCharacter* Arrester, APlayerCharacter* Victim)
+{
+	if (!Victim)
+		return;
+
+	if (!Arrester)
+		return;
+
+	if (Arrester->IsLocalPlayer())
+	{
+		AReadyOrNotGameState* gs = Cast<AReadyOrNotGameState>(GetWorld()->GetGameState());
+		if (gs)
+		{
+			FKillFeedData kf;
+			kf.Name = Victim->GetPlayerState()->GetPlayerName();
+			kf.Type = EKillfeedType::KT_Arrest;
+			gs->KillfeedData.Add(kf);
+		}
+	}
+}
+
+void APlayerCharacter::LocalFreeFeed_Implementation(APlayerCharacter* Freer, APlayerCharacter* Victim)
+{
+	if (!Victim)
+		return;
+
+	if (!Freer)
+		return;
+
+	if (Freer->IsLocalPlayer())
+	{
+		AReadyOrNotGameState* gs = Cast<AReadyOrNotGameState>(GetWorld()->GetGameState());
+		if (gs)
+		{
+			FKillFeedData kf;
+			kf.Name = Victim->GetPlayerState()->GetPlayerName();
+			kf.Type = EKillfeedType::KT_Free;
+			gs->KillfeedData.Add(kf);
+		}
+	}
+}
+
+void APlayerCharacter::LocalDeathFeed_Implementation(class AReadyOrNotPlayerController* PlayerController)
+{
+	if (PlayerController == UBpGameplayHelperLib::GetLocalPlayerController(GetWorld()))
+	{
+		AReadyOrNotGameState* gs = Cast<AReadyOrNotGameState>(GetWorld()->GetGameState());
+		if (gs)
+		{
+			// Just done in the blueprint now
+			//FKillFeedData kf;
+			//kf.Name = PlayerController->PlayerState->GetPlayerName();
+			//kf.Type = EKillfeedType::KT_Death;
+			//gs->KillfeedData.Add(kf);
+		}
+	}
+}
+
+void APlayerCharacter::Server_ActorPickedUp_Implementation(APickupActor* PickupActor)
+{
+	if (PickupActor)
+	{
+		PickupActor->ActorPickedUp(this);
+
+		if (AEvidenceActor* EvidenceActor = Cast<AEvidenceActor>(PickupActor))
+			LastCollectedEvidence = EvidenceActor;
+	}
+}
+
+void APlayerCharacter::Server_InstaStartFree_Implementation(APlayerCharacter* Target)
+{
+	if (!Target)
+		return;
+
+	AMultitool* z = nullptr;
+	for (int32 i = 0; i <  GetInventoryComponent()->GetInventoryItems().Num(); i++)
+	{
+		AMultitool* Multitool = Cast<AMultitool>(GetInventoryComponent()->GetInventoryItems()[i]);
+		if (!Multitool)
+			continue;
+
+		z = Multitool;
+		break;
+	}
+
+	if (z)
+	{
+		z->CurrentToolKit = EMultitoolFunctions::MF_Knife;
+		GetInventoryComponent()->PutItemInHands(z);
+		z->StartUsingTool(Target);
+	}
+}
+
+bool APlayerCharacter::Server_InstaStartFree_Validate(APlayerCharacter* Target)
+{
+	return true;
+}
+
+void APlayerCharacter::Server_InstaStartArrest_Implementation(APlayerCharacter* Target)
+{
+	if (!Target)
+		return;
+
+	AZipcuffs* z = Cast<AZipcuffs>(GetInventoryComponent()->GetInventoryItemOfClass(AZipcuffs::StaticClass()));
+	if (z)
+	{
+		GetInventoryComponent()->PutItemInHands(z);
+		z->Server_ArrestStart_Implementation(Target);
+	}
+}
+
+bool APlayerCharacter::Server_InstaStartArrest_Validate(APlayerCharacter* Target)
+{
+	return true;
+}
+
+
+void APlayerCharacter::Server_SpawnEjectedMagazine_Implementation(FTransform SpawnTransform, ABaseMagazineWeapon* Weapon)
+{
+	if (GetLocalRole() < ROLE_Authority || Weapon == nullptr)
+	{
+		return;
+	}
+
+	APickupMagazineActor* NewMagazine = GetWorld()->SpawnActor<APickupMagazineActor>(APickupMagazineActor::StaticClass(), SpawnTransform);
+	if (NewMagazine)
+	{
+		NewMagazine->SetWeapon(Weapon);
+		NewMagazine->Multicast_SetWeapon(Weapon);
+	}
+}
+
+void APlayerCharacter::Melee()
+{
+	if (IsCarried() || IsCarrying())
+		return;
+	
+	if (IsAnimationBlocking())
+	{
+		return;
+	}
+
+	if (LastInteractableComponent)
+	{
+		if (LastInteractableComponent->CanInteract() && LastInteractableComponent->InputActionNameMatchesAnySlot("Melee"))
+		{
+			LastInteractableComponent->OnInteract(this);
+			
+			if (IsNetMode(NM_Standalone))
+			{
+				Server_MeleeInteract(LastInteractableComponent->GetUseActor(), LastInteractableComponent);
+			}
+			else
+			{
+				if (HasAuthority())
+					Execute_MeleeInteract(LastInteractableComponent->GetUseActor(), this, LastInteractableComponent);
+				else
+					Server_MeleeInteract(LastInteractableComponent->GetUseActor(), LastInteractableComponent);
+			}
+			
+			return;
+		}
+	}
+	
+    const FHitResult TraceHit = GetHitFromCamera(300, {ECC_WorldDynamic});
+    if (Cast<ADoor>(TraceHit.GetActor()))
+    {
+    	bWaitingForDoubleTapMelee = true;
+    	DoubleTapTimeRemaining = 0.2f;
+    	return;
+    }
+	
+	StartMelee();
+	
+	OnMelee.Broadcast();
+}
+
+bool APlayerCharacter::CanPingActor(AActor* Actor) const
+{
+	if (const IPingInterface* ActorAsPingInterface = Cast<IPingInterface>(Actor))
+	{
+		return !ActorAsPingInterface->bPinged;
+	}
+
+	return false;
+}
+
+void APlayerCharacter::Ping()
+{
+	Server_Ping();
+}
+
+void APlayerCharacter::Server_Ping_Implementation()
+{
+	const FHitResult Hit = GetHitFromCamera(100000.0f, {ECC_WorldStatic, ECC_WorldDynamic, ECC_Pawn, ECC_Visibility, ECC_GameTraceChannel2, ECC_GameTraceChannel3, ECC_GameTraceChannel6});
+	if (Hit.GetActor() && Hit.GetActor()->Implements<UPingInterface>())
+	{
+		IPingInterface* ActorAsPingInterface = Cast<IPingInterface>(Hit.GetActor());
+		if (CanPingActor(Hit.GetActor()) && Execute_CanPing(Hit.GetActor()) && !ActorAsPingInterface->bPinged)
+		{
+			APingActor* PingMarker = GetWorld()->SpawnActor<APingActor>(APingActor::StaticClass(), FVector::ZeroVector, FRotator::ZeroRotator);
+			if (PingMarker)
+			{
+				ActorAsPingInterface->bPinged = true;
+
+				PingMarker->SetActorLocation(Execute_GetPingLocation(Hit.GetActor()));
+
+				PingMarker->Setup(Hit.GetActor());
+			}
+		}
+	}
+}
+
+void APlayerCharacter::DoLowReadyVolumeTrace()
+{
+	constexpr float VolumeTraceDistance = 10000.0f;
+	FVector Direction = GetControlRotation().Vector() * VolumeTraceDistance;
+	
+	const FVector TraceStart = FirstPersonCameraComponent->GetComponentLocation() + FirstPersonCameraComponent->GetRightVector() * 5.0f;
+	const FVector TraceEnd = TraceStart + Direction;
+	
+	FCollisionObjectQueryParams ObjectQueryParams;
+	ObjectQueryParams.AddObjectTypesToQuery(ECC_VOLUME);
+	ObjectQueryParams.AddObjectTypesToQuery(ECC_WorldStatic);
+	ObjectQueryParams.AddObjectTypesToQuery(ECC_WorldDynamic);
+	ObjectQueryParams.AddObjectTypesToQuery(ECC_DOOR);
+	ObjectQueryParams.AddObjectTypesToQuery(ECC_Pawn);
+	ObjectQueryParams.AddObjectTypesToQuery(ECC_Destructible);
+	ObjectQueryParams.AddObjectTypesToQuery(ECC_PhysicsBody);
+
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActors(GetCollisionIgnoredActors());
+
+	FTraceDelegate Delegate = FTraceDelegate::CreateWeakLambda(this, [&](const FTraceHandle& TraceHandle, FTraceDatum& TraceDatum)
+	{
+		bIsLowReadyFromVolume = false;
+		for (const FHitResult& Hit : TraceDatum.OutHits)
+		{
+			// If the first valid hit is a low ready volume, low ready and break
+			// ##UE5UPGRADE## Compatibility
+			AForceLowReadyVolume* LowReadyVolume = Cast<AForceLowReadyVolume>(Hit.HitObjectHandle.FetchActor());
+			if (IsValid(LowReadyVolume))
+			{
+				// If the hit distance is zero we're inside the volume
+				if (Hit.Distance <= 0.0f && !LowReadyVolume->bForceLowReadyWhileInside)
+					continue;
+
+				if (!LowReadyVolume->bForceLowReadyWhileAimingAt)
+					continue;
+
+				bIsLowReadyFromVolume = true;
+				break;
+			}
+
+			// If this is another type of volume, ignore this hit
+			if (IsValid(Hit.GetComponent()) && Hit.Component->GetCollisionObjectType() == ECC_VOLUME)
+				continue;
+
+			// If this is any other type of object, we aren't aiming at a low ready volume
+			break;
+		}
+	});
+	GetWorld()->AsyncLineTraceByObjectType(EAsyncTraceType::Multi, TraceStart, TraceEnd, ObjectQueryParams, QueryParams, &Delegate);
+}
+
+void APlayerCharacter::ForceFirstDraw()
+{
+	ABaseMagazineWeapon* bmw = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+	if (bmw)
+	{
+		bmw->PlayDraw(true);
+	}
+}
+
+void APlayerCharacter::Server_ChangeFPMesh_Implementation(USkeletalMesh* NewFPMesh)
+{
+	Rep_FPMesh = NewFPMesh;
+	OnRep_MeshReplicated();
+}
+
+bool APlayerCharacter::Server_ChangeFPMesh_Validate(USkeletalMesh* NewFPMesh)
+{
+	return true;
+}
+
+void APlayerCharacter::LockAllActions()
+{
+	LockAim();
+	LockMovementAndActions();
+}
+
+void APlayerCharacter::UnlockAllActions()
+{
+	UnlockAim();
+	UnlockMovementAndActions();
+}
+
+void APlayerCharacter::LockMovementAndActions()
+{
+	LockMovement();
+	bActionsLocked = true;
+}
+
+void APlayerCharacter::UnlockMovementAndActions()
+{
+	UnlockMovement();
+	bActionsLocked = false;
+}
+
+void APlayerCharacter::LockMovement()
+{
+	#if !UE_BUILD_SHIPPING
+	if (!bMovementLocked)
+	{
+		LOG_CLASS_FUNC
+	}
+	#endif
+	
+	bMovementLocked = true;
+}
+
+void APlayerCharacter::UnlockMovement()
+{
+	#if !UE_BUILD_SHIPPING
+	if (bMovementLocked)
+	{
+		LOG_CLASS_FUNC
+	}
+	#endif
+	
+	bMovementLocked = false;
+
+}
+
+void APlayerCharacter::LockAim()
+{
+	bAimLocked = true;
+}
+
+void APlayerCharacter::UnlockAim()
+{
+	bAimLocked = false;
+}
+
+void APlayerCharacter::LockItemSelection()
+{
+	bItemSelectionLocked = true;
+}
+
+void APlayerCharacter::UnlockItemSelection()
+{
+	bItemSelectionLocked = false;
+}
+
+void APlayerCharacter::LockCommandMenu()
+{
+	bCommandMenuLocked = true;
+
+	if (bIsSwatCommandOpen && SwatCommandWidget)
+	{
+		SwatCommandWidget->CloseCommandMenu();
+	}
+}
+
+void APlayerCharacter::UnlockCommandMenu()
+{
+	bCommandMenuLocked = false;
+}
+
+void APlayerCharacter::LockWeaponAttachments()
+{
+	bWeaponAttachmentsLocked = true;
+}
+
+void APlayerCharacter::UnlockWeaponAttachments()
+{
+	bWeaponAttachmentsLocked = false;
+}
+
+void APlayerCharacter::LockCantedSight()
+{
+	bCantedSightLocked = true;
+}
+
+void APlayerCharacter::UnlockCantedSight()
+{
+	bCantedSightLocked = false;
+}
+
+void APlayerCharacter::OnItemEquipped(ABaseItem* NewEquippedItem)
+{
+	Super::OnItemEquipped(NewEquippedItem);
+
+	if (!NewEquippedItem)
+		return;
+
+	if (bAiming)
+	{
+		DoAimDownSights();
+	}
+	
+	GetFMODBreathingComp()->SetEvent(NewEquippedItem->BreathingAudioOverride);
+
+	if (PendingAutoReport)
+	{
+		FTimerDelegate d = FTimerDelegate::CreateWeakLambda(this, [&]
+		{
+			if (PendingAutoReport && !PendingAutoReport->bHasBeenReported)
+			{
+				Server_ReportTarget(PendingAutoReport);
+			}
+			
+			PendingAutoReport = nullptr;
+		});
+		// ##UE5UPGRADE## Compatibility
+		UReadyOrNotFunctionLibrary::StartTimerForCallback(this, d, (NewEquippedItem->AnimationData->Draw.Body_FP->GetPlayLength())-0.5f);
+	}
+}
+
+void APlayerCharacter::OnItemHolstered(ABaseItem* HolsteredItem)
+{
+	Super::OnItemHolstered(HolsteredItem);
+
+	if (bAiming)
+	{
+		DoAimDownSights();
+	}
+}
+
+void APlayerCharacter::OnEquippedWeaponMagCheck(ABaseMagazineWeapon* Weapon)
+{
+	Super::OnEquippedWeaponMagCheck(Weapon);
+
+	if (!Weapon || !Weapon->AnimationData)
+		return;
+
+	// Display mag check UI
+	if (UBpGameplayHelperLib::GetWidgetData()->MagCheckUI)
+	{
+		if (Weapon->AnimationData->MagazineCheck.Body_FP)
+		{
+			if (!MagCheckUI)
+				MagCheckUI = CreateWidget<UUserWidget>(GetWorld(), UBpGameplayHelperLib::GetWidgetData()->MagCheckUI);
+
+			if (MagCheckUI)
+			{
+				MagCheckUI->AddToViewport(0);
+			}
+		}
+	}
+}
+
+void APlayerCharacter::ApplyPlayerEffect(UBasePlayerEffect* InPlayerEffect, const bool bResettable)
+{
+	if (InPlayerEffect)
+	{
+		InPlayerEffect->Initialize(this);
+		InPlayerEffect->ApplyEffect();
+		
+		InPlayerEffect->OnGameplayEffectExpired.RemoveDynamic(this, &APlayerCharacter::OnPlayerEffectExpired);
+		InPlayerEffect->OnGameplayEffectExpired.AddDynamic(this, &APlayerCharacter::OnPlayerEffectExpired);
+
+		if (bResettable)
+		{
+			PlayerEffects.Add(InPlayerEffect);
+		}
+	}
+}
+
+void APlayerCharacter::ApplyPlayerEffectFor(UBasePlayerEffect* InPlayerEffect, const float Seconds)
+{
+	if (InPlayerEffect)
+	{
+		InPlayerEffect->Initialize(this);
+		InPlayerEffect->ApplyEffectFor(Seconds);
+		
+		InPlayerEffect->OnGameplayEffectExpired.RemoveDynamic(this, &APlayerCharacter::OnPlayerEffectExpired);
+		InPlayerEffect->OnGameplayEffectExpired.AddDynamic(this, &APlayerCharacter::OnPlayerEffectExpired);
+
+		PlayerEffects.Add(InPlayerEffect);
+	}
+}
+
+void APlayerCharacter::Client_ApplyPlayerEffect_Implementation(TSubclassOf<UBasePlayerEffect> InPlayerEffectClass, bool bResettable, bool bMulticast)
+{
+	Server_ApplyPlayerEffect_Implementation(InPlayerEffectClass, bResettable);
+}
+
+void APlayerCharacter::Server_ApplyPlayerEffect_Implementation(const TSubclassOf<class UBasePlayerEffect> InPlayerEffectClass, const bool bResettable /*= true*/, const bool bMulticast /*= false*/)
+{
+	if (!InPlayerEffectClass)
+		return;
+
+	if (bResettable)
+	{
+		// Is it already applied?
+		for (const UBasePlayerEffect* Effect : PlayerEffects)
+		{
+			if (Effect->IsA(InPlayerEffectClass))
+				return;
+		}
+	}
+
+	UBasePlayerEffect* PlayerEffect = NewObject<UBasePlayerEffect>(this, InPlayerEffectClass.Get(), InPlayerEffectClass->GetFName(), RF_NoFlags, InPlayerEffectClass.GetDefaultObject(), true);
+
+	ApplyPlayerEffect(PlayerEffect, bResettable);
+}
+
+void APlayerCharacter::Server_ApplyPlayerEffectFor_Implementation(const TSubclassOf<class UBasePlayerEffect> InPlayerEffectClass, const float Seconds, const bool bMulticast /*= false*/)
+{
+	if (!InPlayerEffectClass)
+		return;
+
+	// Is it already applied?
+	for (const UBasePlayerEffect* Effect : PlayerEffects)
+	{
+		if (Effect->IsA(InPlayerEffectClass))
+			return;
+	}
+
+	UBasePlayerEffect* PlayerEffect = NewObject<UBasePlayerEffect>(this, InPlayerEffectClass.Get(), InPlayerEffectClass->GetFName(), RF_NoFlags, InPlayerEffectClass.GetDefaultObject(), true);
+
+	ApplyPlayerEffect(PlayerEffect);
+}
+
+void APlayerCharacter::Client_ResetPlayerEffect_Implementation(TSubclassOf<UBasePlayerEffect> InPlayerEffectClass)
+{
+	if (!InPlayerEffectClass)
+		return;
+
+	int32 Index = 0;
+	for (UBasePlayerEffect* Effect : PlayerEffects)
+	{
+		if (Effect->IsA(InPlayerEffectClass))
+		{
+			//Effect->Server_ResetEffect_Implementation(bMulticast);
+			Effect->ResetEffect();
+			break;
+		}
+
+		Index++;
+	}
+
+	if (PlayerEffects.IsValidIndex(Index))
+	{
+		PlayerEffects.RemoveAt(Index);
+	}
+}
+
+void APlayerCharacter::OnPlayerEffectExpired_Implementation(const TSubclassOf<class UReadyOrNotGameplayEffect> InPlayerEffectClass)
+{
+	if (!InPlayerEffectClass)
+		return;
+
+	PlayerEffects.RemoveAll([&](const UBasePlayerEffect* Effect)
+	{
+		return Effect->IsA(InPlayerEffectClass);
+	});
+}
+
+void APlayerCharacter::Server_ResetPlayerEffect_Implementation(const TSubclassOf<class UBasePlayerEffect> InPlayerEffectClass, const bool bMulticast /*= false*/)
+{
+	if (!InPlayerEffectClass)
+		return;
+
+	int32 Index = 0;
+	for (UBasePlayerEffect* Effect : PlayerEffects)
+	{
+		if (Effect->IsA(InPlayerEffectClass))
+		{
+			//Effect->Server_ResetEffect_Implementation(bMulticast);
+			Effect->ResetEffect();
+			break;
+		}
+
+		Index++;
+	}
+
+	if (PlayerEffects.IsValidIndex(Index))
+		PlayerEffects.RemoveAt(Index);
+}
+
+void APlayerCharacter::Server_EquipMultitool_Implementation(const EMultitoolFunctions MultitoolFunction)
+{
+	if (AMultitool* EquippedMultitool = GetEquippedItem<AMultitool>())
+	{
+		EquippedMultitool->ChangeToolkit(MultitoolFunction, true);
+	}
+	else
+	{
+		if (AMultitool* Multitool = Cast<AMultitool>(GetInventoryComponent()->GetInventoryItemOfType(EItemCategory::IC_Multitool)))
+		{
+			Multitool->ChangeToolkit(MultitoolFunction, false);
+			GetInventoryComponent()->PutItemInHands(Multitool);
+		}
+	}
+}
+
+void APlayerCharacter::PrintItemAttachmentListToLog()
+{
+	for (ABaseItem* bi : GetInventoryComponent()->GetInventoryItems())
+	{
+		if (!bi)
+		{
+			continue;
+		}
+		 FString FPAttach = bi->GetItemMesh()->GetAttachParent() ? bi->GetItemMesh()->GetAttachParent()->GetName() : "None";
+		V_LOGM(LogReadyOrNot, "%s FP: %s", *bi->GetName(), *FPAttach);
+	}
+}
+
+void APlayerCharacter::Server_FinishedUsingMultitool_Implementation(class AReadyOrNotCharacter* ToolOwner)
+{
+	UnlockAllActions();
+	GetInventoryComponent()->EquipItemOfClass(ABaseMagazineWeapon::StaticClass());
+	bArrestComplete = false;
+	TArray<AActor*> OutActors;
+	GetAttachedActors(OutActors);
+	for (int32 i = 0; i < OutActors.Num(); i++)
+	{
+		APlacedZipcuffs* pz = Cast<APlacedZipcuffs>(OutActors[i]);
+		if (pz)
+		{
+			pz->Destroy();
+		}
+	}
+
+	APlayerCharacter* ToolOwnerChar = Cast<APlayerCharacter>(ToolOwner);
+	if (ToolOwnerChar)
+	{
+		if (GetLocalRole() == ROLE_Authority)
+		{
+			Server_FreefeedMessage_Implementation(ToolOwnerChar, this);
+		}
+		else
+		{
+			Server_FreefeedMessage(ToolOwnerChar, this);
+		}
+
+		AReadyOrNotGameState* gs = Cast<AReadyOrNotGameState>(GetWorld()->GetGameState());
+		if (gs)
+		{
+			gs->PlayAnnouncerForTeam("RecognizeTeamwork", GetTeam());
+		}
+	}
+
+
+	OnPlayerFreed.Broadcast(this, ToolOwner);
+}
+
+void APlayerCharacter::PrimaryUse()
+{
+	if (IsCarried())
+		return;
+
+	if (IsCarrying())
+	{
+		DropArrestedTarget(CurrentCarryCharacter);
+		return;
+	}
+	
+	if (!GetEquippedItem() || (IsDeadOrUnconscious() && !bForceFireEvenWhenDead))
+		return;
+
+	AShotgun* Shotgun = Cast<AShotgun>(GetEquippedItem());
+	if (Shotgun)
+	{
+		if (GetEquippedItem() && GetEquippedItem()->IsCurrentlyReloading())
+		{
+			GetEquippedItem()->CancelCurrentReloadAction(true);
+		}
+	}
+
+	if (IsAnimationBlocking())
+	{
+		V_LOGM(LogReadyOrNot, "Animation Blocked!");
+		
+		ABaseMagazineWeapon* bmw = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+		if (bIsFullAutoFiring && bmw)
+		{
+			// Ensure that if any blocking anim starts to play we stop full auto noises
+			EndPrimaryUse();
+		}
+		
+		return;
+	}
+	
+	//V_LOGM(LogReadyOrNot, "Firing!");
+
+	if (IsArrested())
+	{
+		//PlayMontageFromTable("shared_pvp_beckon_good");
+		const int MaxCount = GetMontageAnimCountFromTable("fp_pvp_beckon_good");
+		const int CurIndex = FMath::FRandRange(0.0f, MaxCount);
+		PlayMontageFromTableWithIndex("fp_pvp_beckon_good", CurIndex);
+		PlayMontageFromTableWithIndex("tp_pvp_beckon_good", CurIndex);
+		Server_PlayPVPSpeech("RequestAssistanceWhileArrested", GetTeam());
+		return;
+	}
+	ABaseWeapon* bw = Cast<ABaseWeapon>(GetEquippedItem());
+	ABaseGrenade* bg = Cast<ABaseGrenade>(GetEquippedItem());
+	
+	bHoldingPrimaryUse = true;
+	LastFireAttemptTime = 0.0f;
+
+	if (bActionsLocked)
+	{
+		return;
+	}
+
+	/*if (RevivingPlayer)
+	{
+		return;
+	}*/
+
+	if (IsArrested())
+	{
+		return;
+	}
+
+	if (bIsFullAutoFiring)
+	{
+		if (bLowReadyPointDown || bLowReadyPointUp)
+		{
+			EndPrimaryUse();
+		}
+	}
+	
+	if (!GetWorld()->GetTimerManager().IsTimerActive(BurstLoop_Handle))
+	{
+		if (bLowReadyPointUp || (bLowReadyPointDown && (bw || bg)))
+			return;
+
+		if (IsSprinting() || IsHoldingSprint())
+			Walk();
+	}
+
+	if (bw)
+	{
+		if (bw->CurrentFireMode != EFireMode::FM_Auto && bw->CurrentFireMode != EFireMode::FM_Burst)
+		{
+			EndPrimaryUse();
+			bIsFullAutoFiring = false;
+		}
+		if (bw->CurrentFireMode != EFireMode::FM_Burst)
+		{
+			// EndPrimaryUse();
+			GetWorld()->GetTimerManager().ClearTimer(BurstLoop_Handle);
+		}
+		
+		bw->OnFireAtBulletSpawn();
+		if (!GetWorld()->GetTimerManager().IsTimerActive(BurstLoop_Handle))
+		{
+			burstFireCount = 0;
+		}
+		else
+		{
+			burstFireCount += 1;
+		}
+
+		// Call this again until mouse released.
+		if (bw->CurrentFireMode == EFireMode::FM_Auto || bw->CurrentFireMode == EFireMode::FM_Burst)
+		{
+			ABaseMagazineWeapon* bmw = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+			if (bmw)
+			{
+				if ((bmw->GetAmmo() <= 0.0f /*&& !bmw->bFireIfNoAmmo*/) || (burstFireCount >= (bmw->BurstBulletCount - 1)))
+				{
+					EndPrimaryUse();
+					GetWorld()->GetTimerManager().ClearTimer(BurstLoop_Handle);
+					return;
+				}
+
+				// TODO(killo): why does one of these use a field for timer, but the other a timer manager
+				if (bw->CurrentFireMode == EFireMode::FM_Auto)
+				{
+					bIsFullAutoFiring = true;
+					TimeUntilNextFullAutoFiring = bw->FireRate;
+				}
+				else if (bw->CurrentFireMode == EFireMode::FM_Burst && !GetWorld()->GetTimerManager().IsTimerActive(BurstLoop_Handle))
+				{
+					GetWorld()->GetTimerManager().SetTimer(BurstLoop_Handle, this, &APlayerCharacter::PrimaryUse, bw->FireRate, true, FMath::Max(bw->FireRate, bw->RefireDelay));
+				}
+			}
+		}
+	}
+
+	ABaseItem* bi = Cast<ABaseItem>(GetEquippedItem());
+	if (bi)
+	{
+		// Call the BP Item Use event, only actually used if it's dropped in a BP.
+		bi->OnItemUsed();
+
+		// Bind to the C++ Item Use Event to propagate item usage to the Player Character level.
+		bi->OnItemPrimaryUseStart.AddUniqueDynamic(this, &APlayerCharacter::OnItemPrimaryUse);
+		bi->OnItemUseCompleted.AddUniqueDynamic(this, &APlayerCharacter::OnItemPrimaryUseCompleted);
+
+		// Call the C++ Item Use Event
+		bi->OnItemPrimaryUse();
+		
+		Event_OnItemPrimaryUse.Broadcast(this, bi);
+	}
+
+	bWeaponDown3P = false;
+
+	if (GetLocalRole() < ROLE_Authority)
+		Server_PrimaryUse();
+
+	if (LastInteractableComponent && LastInteractableComponent->CanInteract() && LastInteractableComponent->InputActionNameMatchesAnyValidSlot("Fire"))
+	{
+		Server_Interact_PrimaryUse(LastInteractableComponent->GetUseActor(), LastInteractableComponent);
+		Server_Interact_PrimaryUse_Implementation(LastInteractableComponent->GetUseActor(), LastInteractableComponent);
+
+		LastInteractableComponent->OnInteract(this);
+	}
+}
+
+void APlayerCharacter::OnItemPrimaryUse(ABaseItem* Item)
+{
+	if (IsLocalPlayer())
+		OnItemUseStart.Broadcast(Item);
+}
+
+void APlayerCharacter::OnItemPrimaryUseCompleted(ABaseItem* Item)
+{
+	if (IsLocalPlayer())
+		OnItemUseCompleted.Broadcast(Item);
+}
+
+void APlayerCharacter::PrimaryUseAxis(float AxisValue)
+{
+	// TODO: Controller check
+	/*if (AxisValue >= 1.0f)
+	{
+		if (!bTriggerAxisPressed)
+		{
+			bTriggerAxisPressed = true;
+			PrimaryUse();
+		}
+	}
+	else
+	{
+		bTriggerAxisPressed = false;
+
+		EndPrimaryUse();
+	}*/
+	
+	//ULog::Number(AxisValue, "axis: ");
+}
+
+void APlayerCharacter::Server_PrimaryUse_Implementation()
+{
+	bWeaponDown3P = false;
+	SpawnProtectionTime = 0.0f;
+	ABaseItem* bi = Cast<ABaseItem>(GetEquippedItem());
+	if (bi)
+	{
+		bi->OnItemUsed();
+	}
+
+}
+
+void APlayerCharacter::EndPrimaryUse()
+{
+	bHoldingPrimaryUse = false;
+	ABaseWeapon* bw = Cast<ABaseWeapon>(GetEquippedItem());
+	if (bw)
+	{
+		bw->OnWeaponFiredEnd();
+	}
+
+	ABaseItem* bi = Cast<ABaseItem>(GetEquippedItem());
+	if (bi)
+	{
+		// Call the BP Item Use event, only actually used if it's dropped in a BP.
+		bi->OnItemEndUse();
+
+		// Call the C++ Item Use Event
+		bi->OnItemPrimaryUseEnd();
+	}
+
+	bFireLoop = false;
+	bIsFullAutoFiring = false;
+	TimeUntilNextFullAutoFiring = 1.0f;
+	
+	if (GetLocalRole() < ROLE_Authority)
+		Server_EndPrimaryUse();
+
+	if (LastInteractableComponent && LastInteractableComponent->CanInteract())
+	{
+		Server_EndInteract_PrimaryUse(LastInteractableComponent->GetUseActor(), LastInteractableComponent);
+		Server_EndInteract_PrimaryUse_Implementation(LastInteractableComponent->GetUseActor(), LastInteractableComponent);
+	}
+}
+
+void APlayerCharacter::Server_EndPrimaryUse_Implementation()
+{
+	ABaseItem* bi = Cast<ABaseItem>(GetEquippedItem());
+	if (bi)
+	{
+		bi->OnItemEndUse();
+	}
+}
+
+bool APlayerCharacter::IsAnimationBlocking() const
+{
+	if (GetLocalRole() == ROLE_Authority && !IsLocalPlayer())
+	 	return bServerIsBlockingAnimationPlaying;
+	
+	bool bHasBlockingAnimPlaying = false;
+
+	if (GetBleedComponent()->HasStartedHealing())
+	{
+		//ULog::Info("Animation blocking: healing");
+		bHasBlockingAnimPlaying = true;
+	}
+
+	if (IsTableMontagePlaying("fp_heal_first"))
+	{
+		//ULog::Info("Animation blocking: healing");
+		bHasBlockingAnimPlaying = true;
+	}
+
+	if (IsTableMontagePlaying("fp_heal_second"))
+	{
+		//ULog::Info("Animation blocking: healing");
+		bHasBlockingAnimPlaying = true;
+	}
+
+	if (IsTableMontagePlaying("fp_heal_bandage"))
+	{
+		//ULog::Info("Animation blocking: healing");
+		bHasBlockingAnimPlaying = true;
+	}
+
+	if (IsInCinematicAnimation())
+	{
+		//ULog::Info("Animation blocking: cinematic anim");
+		bHasBlockingAnimPlaying = true;
+	}
+
+	if (bActionsLocked)
+	{
+		//ULog::Info("Animation blocking: actions locked");
+		bHasBlockingAnimPlaying = true;
+	}
+	
+	if (LastPlayedVaultMontage && Is1PMontagePlaying(LastPlayedVaultMontage))
+	{
+		//ULog::Info("Animation blocking: vaulting");
+		bHasBlockingAnimPlaying = true;
+	}
+
+	if (UInteractionsData::IsPairedInteractionPlayingOn(this))
+	{
+		bHasBlockingAnimPlaying = true;
+	}
+
+	if (GetEquippedItem() && GetEquippedItem()->IsBlockingAnimationPlaying({}))
+	{
+		//V_LOGM(LogReadyOrNot, "%s is blocking animation!", *GetEquippedItem()->GetName());
+
+		bHasBlockingAnimPlaying = true;
+	}
+
+	ANightvisionGoggles* nvg = Cast<ANightvisionGoggles>(GetInventoryComponent()->GetInventoryItemOfClass(ANightvisionGoggles::StaticClass()));
+	if (nvg && nvg->IsBlockingAnimationPlaying())
+	{
+		//ULog::Info("Animation blocking: nvg");
+
+		// our NVGs can block us
+		bHasBlockingAnimPlaying = true;
+	}
+
+	if (const AChemlight* Chemlight = Cast<AChemlight>(GetInventoryComponent()->GetInventoryItemOfClass(AChemlight::StaticClass())))
+	{
+		if (Chemlight->IsBlockingAnimationPlaying({}))
+		{
+			//ULog::Info("Animation blocking: chemlight");
+			bHasBlockingAnimPlaying = true;
+		}
+	}
+
+	if (IsSprinting() || IsHoldingSprint())
+	{
+		//ULog::Info("Animation blocking: sprint");
+
+		bHasBlockingAnimPlaying = true;
+	}
+
+	return bHasBlockingAnimPlaying;
+}
+
+void APlayerCharacter::Server_UpdateIsBlockingAnimationPlaying_Implementation(const bool bIsBlockingAnimationPlaying)
+{
+	bServerIsBlockingAnimationPlaying = bIsBlockingAnimationPlaying;
+}
+
+void APlayerCharacter::StartLockPicking(AActor* Target)
+{
+	if (ALockpickGun* LockpickGun = Cast<ALockpickGun>(GetEquippedItem()))
+	{
+		LockpickGun->StartUsingTool(Target);
+	}
+	else if (AMultitool* Multitool = Cast<AMultitool>(GetEquippedItem()))
+	{
+		if (Multitool->CurrentToolKit == EMultitoolFunctions::MF_Lockpick)
+			StartUsingMultitool(Target);
+	}
+}
+
+void APlayerCharacter::StopLockPicking(AActor* Target)
+{
+	if (ALockpickGun* LockpickGun = Cast<ALockpickGun>(GetEquippedItem()))
+	{
+		LockpickGun->StopUsingTool(Target);
+	}
+	else
+	{
+		StopUsingMultitool(Target);
+	}
+}
+
+void APlayerCharacter::StartUsingMultitool(AActor* Target)
+{
+	if (AMultitool* Multitool = Cast<AMultitool>(GetEquippedItem()))
+	{
+		Multitool->StartUsingTool(Target);
+	}
+}
+
+void APlayerCharacter::StopUsingMultitool(AActor* Target)
+{
+	if (AMultitool* Multitool = Cast<AMultitool>(GetEquippedItem()))
+	{
+		Multitool->StopUsingTool(Target);
+	}
+}
+
+void APlayerCharacter::EquipPrimaryItem()
+{
+	if (!bIsSwatCommandOpen)
+	{
+		EquipItemOfType(EItemCategory::IC_Primary);
+	}
+}
+
+void APlayerCharacter::EquipSecondaryItem()
+{
+	if (!bIsSwatCommandOpen)
+	{
+		EquipItemOfType(EItemCategory::IC_Secondary);
+	}
+}
+
+void APlayerCharacter::EquipLongTactical()
+{
+	if (!bIsSwatCommandOpen)
+	{
+		EquipItemOfType(EItemCategory::IC_LongTactical);
+	}
+}
+
+void APlayerCharacter::EquipZipcuffs()
+{
+	if (!bIsSwatCommandOpen)
+	{
+		EquipItemOfType(EItemCategory::IC_Zipcuffs);
+	}
+}
+
+void APlayerCharacter::EquipDetonator()
+{
+	if (!bIsSwatCommandOpen)
+	{
+		EquipItemOfType(EItemCategory::IC_Detonator);
+	}
+}
+
+void APlayerCharacter::EquipMultitool()
+{
+	if (!bIsSwatCommandOpen)
+	{
+		EquipItemOfType(EItemCategory::IC_Multitool);
+	}
+}
+
+void APlayerCharacter::EquipC2()
+{
+	if (!bIsSwatCommandOpen)
+	{
+		EquipItemOfType(EItemCategory::IC_C2Explosive);
+	}
+}
+
+void APlayerCharacter::EquipBreachingShotgun()
+{
+	if (!bIsSwatCommandOpen)
+	{
+		EquipItemOfType(EItemCategory::IC_BreachingShotgun);
+	}
+}
+
+void APlayerCharacter::EquipBatteringRam()
+{
+	if (!bIsSwatCommandOpen)
+	{
+		EquipItemOfType(EItemCategory::IC_BatteringRam);
+	}
+}
+
+void APlayerCharacter::EquipPepperspray()
+{
+	if (!bIsSwatCommandOpen)
+	{
+		EquipItemOfType(EItemCategory::IC_OCSpray);
+	}
+}
+
+void APlayerCharacter::EquipDoorJam()
+{
+	if (!bIsSwatCommandOpen)
+	{
+		EquipItemOfType(EItemCategory::IC_Doorjam);
+	}
+}
+
+void APlayerCharacter::EquipMirrorgun()
+{
+	if (!bIsSwatCommandOpen)
+	{
+		EquipItemOfType(EItemCategory::IC_Optiwand);
+	}
+}
+
+void APlayerCharacter::EquipFlashbang()
+{
+	if (!bIsSwatCommandOpen)
+	{
+		EquipItemOfType(EItemCategory::IC_Flashbang);
+	}
+}
+
+void APlayerCharacter::EquipCSGas()
+{
+	if (!bIsSwatCommandOpen)
+	{
+		EquipItemOfType(EItemCategory::IC_CSGas);
+	}
+}
+
+void APlayerCharacter::EquipStinger()
+{
+	if (!bIsSwatCommandOpen)
+	{
+		EquipItemOfType(EItemCategory::IC_Stingball);
+	}
+}
+
+ABaseItem* APlayerCharacter::EquipItemOfType(EItemCategory ItemCategory)
+{
+	#if !UE_BUILD_SHIPPING
+	ensureAlwaysMsgf(GetInventoryComponent() != nullptr, TEXT("%s | Failed to equip a %s item. Make sure '%s' has an inventory component available"), *FString(__FUNCTION__), *RON_ENUM_TO_STRING(EItemCategory, ItemCategory), *GetNameSafe(this));
+	#endif
+	
+	if (GetInventoryComponent() && !bItemSelectionLocked)
+	{
+		return GetInventoryComponent()->EquipItemOfType(ItemCategory);
+	}
+
+	return nullptr;
+}
+
+ABaseItem* APlayerCharacter::EquipItemFromGroup_Index(const int32 GroupIndex, const int32 ItemCategoryIndex)
+{
+	#if !UE_BUILD_SHIPPING
+	ensureAlwaysMsgf(GetInventoryComponent() != nullptr, TEXT("%s | Failed to equip item from group %i. Make sure '%s' has an inventory component available"), *FString(__FUNCTION__), GroupIndex, *GetNameSafe(this));
+	#endif
+
+	if (GetInventoryComponent())
+	{
+		return GetInventoryComponent()->EquipItemFromGroup_Index(GroupIndex, ItemCategoryIndex);
+	}
+
+	return nullptr;
+}
+
+ABaseItem* APlayerCharacter::EquipItemFromGroup_Name(const FName GroupName, const int32 ItemCategoryIndex)
+{
+	#if !UE_BUILD_SHIPPING
+	ensureAlwaysMsgf(GetInventoryComponent() != nullptr, TEXT("%s | Failed to equip item from group %s. Make sure '%s' has an inventory component available"), *FString(__FUNCTION__), *GroupName.ToString(), *GetNameSafe(this));
+	#endif
+
+	if (GetInventoryComponent())
+	{
+		return GetInventoryComponent()->EquipItemFromGroup_Name(GroupName, ItemCategoryIndex);
+	}
+	
+	return nullptr;
+}
+
+void APlayerCharacter::ToggleUnderbarrelAttachment()
+{
+	if (bWeaponAttachmentsLocked)
+		return;
+
+	Server_ToggleLightByClass(ELightRadialSelection::LR_WeaponLight);
+
+	OnAttachmentLightToggled.Broadcast();
+}
+
+void APlayerCharacter::SecondaryUse()
+{
+	if (IsCarrying())
+	{
+		ThrowArrestedTarget(CurrentCarryCharacter);
+		return;
+	}
+	
+	if (bArrestComplete)
+	{
+		if (!IsAnimationBlocking())
+		{
+			//PlayMontageFromTable("shared_pvp_beckon_bad");
+			const int MaxCount = GetMontageAnimCountFromTable("fp_pvp_beckon_bad");
+			const int CurIndex = FMath::FRandRange(0.0f, MaxCount);
+			PlayMontageFromTableWithIndex("fp_pvp_beckon_bad", CurIndex);
+			PlayMontageFromTableWithIndex("tp_pvp_beckon_bad", CurIndex);
+
+			return;
+		}
+	}
+	
+	if (bInDevicesMenu)
+		return;
+
+	if (IsArrested())
+		return;
+
+	if (bForceLowReady)
+		return;
+
+	bSecondaryUsePressed = true;
+}
+
+void APlayerCharacter::Server_SecondaryUse_Implementation()
+{
+	ABaseItem* bi = Cast<ABaseItem>(GetEquippedItem());
+	if (bi)
+	{
+		bWeaponDown3P = false;
+
+		bi->OnItemSecondaryUsed();
+	}
+}
+
+void APlayerCharacter::Server_UpdateADS_Implementation(bool bADS)
+{
+	bAiming = bADS;
+}
+
+void APlayerCharacter::SecondaryUse_Repeat()
+{
+	if (/*!bToggleADS &&*/ !bAiming)
+	{
+		DoAimDownSights();
+	}
+}
+
+void APlayerCharacter::DoToggleLeanRight()
+{
+	ToggleLeanRight(false);
+}
+
+void APlayerCharacter::DoToggleLeanLeft()
+{
+	ToggleLeanLeft(false);
+}
+
+void APlayerCharacter::ToggleADS()
+{
+	if (bToggled && !bAiming)
+	{
+		bToggled = false;
+	}
+	bToggled = !bToggled;
+	bToggled ? SecondaryUse() : EndSecondaryUse();
+}
+
+void APlayerCharacter::ToggleAimDownSights()
+{
+	DoAimDownSights();
+}
+
+void APlayerCharacter::DoAimDownSights()
+{
+	if (bActionsLocked)
+		return;
+
+	if (bUserLowReady)
+	{
+		bUserLowReady = false;
+	}
+	
+#ifndef RON_NO_SPRINT
+	Walk();
+#endif
+
+	bWeaponDown3P = false;
+
+    if (!IsAnimationBlocking() && !bInTabMenu && !bIsCollectingEvidence)
+    {
+    	// Tablets don't have sights
+		if (GetEquippedItem() && GetEquippedItem()->IsA(ATablet::StaticClass()))
+		{
+			bAiming = false;
+			return;
+		}
+    	
+    	const bool bPreviousAiming = bAiming;
+    	ABaseGrenade* bg = Cast<ABaseGrenade>(GetEquippedItem());
+    	if (!bg)
+    	{
+    		bAiming = !bAiming;
+    	}
+    	else
+    	{
+    		bAiming = false;
+    	}
+
+    	// already been called somewhere
+    	if (bPreviousAiming == bAiming)
+    		return;
+
+    	ABaseWeapon* bw = Cast<ABaseWeapon>(GetEquippedItem());
+    	if (bw)
+    	{
+    		bw->OnAimDownSights(bAiming);
+    	}
+
+    	ABaseItem* bi = Cast<ABaseItem>(GetEquippedItem());
+    	if (bi)
+    	{
+    		bi->OnItemSecondaryUsed();
+    	}
+
+    	if (GetLocalRole() < ROLE_Authority)
+    		Server_UpdateADS(bAiming);
+    }
+}
+
+void APlayerCharacter::EndSecondaryUse()
+{
+	bSecondaryUsePressed = false;
+
+	// already been called somewhere
+	if (!bAiming)
+		return;
+
+	//if (!bToggleADS)
+	//{
+		bAiming = false;
+	//}
+
+	ABaseWeapon* bw = Cast<ABaseWeapon>(GetEquippedItem());
+	if (bw)
+	{
+		bw->OnEndAimDownSights(bAiming);
+	}
+
+	ABaseItem* bi = Cast<ABaseItem>(GetEquippedItem());
+	if (bi)
+	{
+		bi->OnItemEndSecondaryUse();
+	}
+
+	if (GetLocalRole() < ROLE_Authority)
+		Server_UpdateADS(bAiming);
+}
+
+void APlayerCharacter::FireSelect()
+{
+	if (!GetEquippedItem())
+		return;
+
+	if (IsArrested())
+	{
+		return;
+	}
+	
+	GetWorld()->GetTimerManager().SetTimer(FireSelect_Handle, this, &APlayerCharacter::SafeMode, 0.25f, false);
+	bFireSelectHeld = true;
+	FireSelectHeldTime = 0.0f;
+}
+
+void APlayerCharacter::SafeMode()
+{
+	bFireSelectHeld = false;
+	
+	if (IsAnimationBlocking())
+	{
+		return;
+	}
+	
+	if (const ABaseMagazineWeapon* Weapon = GetEquippedWeapon())
+	{
+		//bw->SafeModeToggle();
+		OnWeaponFireModeChanged.Broadcast(this, EFireMode::FM_Safe, Weapon->CurrentFireMode);
+	}
+}
+
+void APlayerCharacter::FireSelectReleased()
+{
+	if (IsArrested())
+	{
+		return;
+	}
+	
+	GetWorld()->GetTimerManager().ClearTimer(FireSelect_Handle);
+	if (bFireSelectHeld)
+	{
+		bFireSelectHeld = false;
+
+		if (!GetEquippedItem())
+		{
+			return;
+		}
+
+		if (!IsAnimationBlocking())
+		{
+			GetEquippedItem()->NextFireMode();
+			ABaseWeapon* bw = Cast<ABaseWeapon>(GetEquippedItem());
+			AReadyOrNotPlayerState* ps = Cast<AReadyOrNotPlayerState>(GetPlayerState());
+			if (ps && bw)
+			{
+				ps->LastFireMode = bw->CurrentFireMode;
+
+				OnWeaponFireModeChanged.Broadcast(this, bw->CurrentFireMode, ps->LastFireMode);
+			}
+		}
+	}
+}
+
+void APlayerCharacter::CycleFireMode()
+{
+	if (IsArrested())
+	{
+		return;
+	}
+	
+	if (!GetEquippedItem())
+	{
+		return;
+	}
+
+	if (!IsAnimationBlocking())
+	{
+		GetEquippedItem()->NextFireMode();
+		ABaseWeapon* bw = Cast<ABaseWeapon>(GetEquippedItem());
+		AReadyOrNotPlayerState* ps = Cast<AReadyOrNotPlayerState>(GetPlayerState());
+		if (ps && bw)
+		{
+			ps->LastFireMode = bw->CurrentFireMode;
+
+			OnWeaponFireModeChanged.Broadcast(this, bw->CurrentFireMode, ps->LastFireMode);
+		}
+	}
+	
+}
+
+EFireMode APlayerCharacter::GetFiringMode()
+{
+	if (ABaseWeapon* bw = GetEquippedItem<ABaseWeapon>())
+	{
+		return bw->CurrentFireMode;
+	}
+	
+	return EFireMode::FM_Safe;
+}
+
+bool APlayerCharacter::EquippedWeaponHasFireModes()
+{
+	if (ABaseWeapon* bw = GetEquippedItem<ABaseWeapon>())
+	{
+		if (bw->AvailableFireModes.Num() >= 2)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+void APlayerCharacter::SwitchAmmoType()
+{
+	ABaseMagazineWeapon* Weapon = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+	if (Weapon && !IsReloading())
+	{
+		// Only reload if ammo type changes
+		if (Weapon->IncrementAmmoType())
+			TacticalReload();
+
+		// Set a flag to show the magcheck UI if we reload into a new ammo type
+		bShowMagCheckAfterReload = true;
+		
+		OnWeaponSwitchAmmoType.Broadcast(this);
+	}
+}
+
+void APlayerCharacter::SwitchAmmoType(FName AmmoType)
+{
+	ABaseMagazineWeapon* Weapon = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+	if (Weapon && !IsReloading())
+	{
+		// Only reload if ammo type changes
+		if (Weapon->IncrementAmmoType(AmmoType))
+			TacticalReload();
+
+		// Set a flag to show the magcheck UI if we reload into a new ammo type
+		bShowMagCheckAfterReload = true;
+
+		OnWeaponSwitchAmmoType.Broadcast(this);
+	}
+}
+
+void APlayerCharacter::StartChemThrow()
+{
+	if (bCommandInterfaceActive || !CanThrowChemlight())
+	{
+		return;
+	}
+
+	PlayMontageFromTable("fp_swt_dropchem");
+	if (PlayMontageFromTable("tp_swt_dropchem"))
+	{	
+		PlayRawVO(VO_SWAT_GENERAL::RESPONSE_DEPLOY_CHEMLIGHT);
+	}
+
+	OnChemlightThrown.Broadcast(this);
+}
+
+void APlayerCharacter::RemovePendingC2()
+{
+	ENetRole NetRole = GetLocalRole();
+	if (!HasAuthority())
+		return;
+	
+	if (PendingC2Removal)
+	{
+		PendingC2Removal->RemoveFromTarget();
+		PendingC2Removal = nullptr;
+
+		UnlockMovement();
+		UnlockAim();
+	}
+}
+
+void APlayerCharacter::Client_OnEndRemoveC2_Implementation()
+{
+	PendingC2Removal = nullptr;
+	StopFPMontageFromTable("fp_remove_c2");
+}
+
+void APlayerCharacter::Client_OnBeginRemoveC2_Implementation(APlacedC2Explosive* C2)
+{
+	PendingC2Removal = C2;
+	PlayMontageFromTable("fp_remove_c2");
+}
+
+void APlayerCharacter::Reload()
+{
+	if (IsCarried() || IsCarrying())
+		return;
+
+	if (IsArrested())
+	{
+		return;
+	}
+	
+	if (GetEquippedItem() && GetEquippedItem()->IsCurrentlyReloading())
+	{
+		GetEquippedItem()->CancelCurrentReloadAction(true);
+		return;
+	}
+
+	GetWorld()->GetTimerManager().ClearTimer(ReloadOrMagCheck_Handle);
+
+	if (IsAnimationBlocking())
+		return;
+
+	if (!GetEquippedItem())
+		return;
+
+	GetEquippedItem()->CancelCurrentReloadAction(false);
+
+	bWeaponDown3P = false;
+
+	ABaseMagazineWeapon* bmw = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+	if (bmw)
+	{
+		bmw->OnWeaponReload();
+	}
+
+	ABallisticsShield* bs = Cast<ABallisticsShield>(GetEquippedItem());
+	if (bs)
+	{
+		bs->OnItemReload();
+	}
+
+	OnWeaponReload.Broadcast(this);
+}
+
+void APlayerCharacter::Server_OnReloadComplete_Implementation()
+{
+	if (!GetEquippedItem())
+		return;
+
+	ABaseWeapon* bw = Cast<ABaseWeapon>(GetEquippedItem());
+	if (bw)
+	{
+		bw->OnWeaponReloadComplete();
+	}
+
+	ABallisticsShield* bs = Cast<ABallisticsShield>(GetEquippedItem());
+	if (bs)
+	{
+		bs->OnItemReloadComplete();
+	}
+}
+
+void APlayerCharacter::ReloadOrMagCheck()
+{
+	if (IsCarried() || IsCarrying())
+		return;
+
+	if (IsArrested())
+	{
+		return;
+	}
+
+	if (GetEquippedItem() && GetEquippedItem()->IsCurrentlyReloading())
+	{
+		GetEquippedItem()->CancelCurrentReloadAction(true);
+		return;
+	}
+
+	if (GetEquippedItem())
+	{
+		GetEquippedItem()->CancelCurrentReloadAction(false);
+
+		GetWorld()->GetTimerManager().SetTimer(ReloadOrMagCheck_Handle, this, &APlayerCharacter::TacticalReload, 0.25f, false);
+		bReloadHeld = true;
+		ReloadHeldTime = 0.0f;
+	}
+}
+
+void APlayerCharacter::ReloadOrMagCheck_Released()
+{
+	bReloadHeld = false;
+}
+
+void APlayerCharacter::ReplenishAllMagazineAmmo()
+{
+	TArray<ABaseMagazineWeapon*> MagazineWeapons = GetInventoryComponent()->GetInventoryItemsOfClass<ABaseMagazineWeapon>(ABaseMagazineWeapon::StaticClass());
+	for (ABaseMagazineWeapon* MagazineWeapon : MagazineWeapons)
+	{
+		if (MagazineWeapon)
+		{
+			ULog::Number(MagazineWeapon->GetAmmo(), CUR_FUNC_2 + MagazineWeapon->GetName() + " | Ammo before: ");
+
+			MagazineWeapon->ReplenishAmmo();
+
+			ULog::Number(MagazineWeapon->GetAmmo(), CUR_FUNC_2 + MagazineWeapon->GetName() + " | Ammo after: ");
+		}
+	}
+}
+
+void APlayerCharacter::ReplenishAllGrenadeAmmo()
+{
+	FSavedLoadout Loadout = GetInventoryComponent()->GetLastEquippedLoadout();
+	FSpawnedGear& SpawnedGear = GetInventoryComponent()->GetSpawnedGear();
+
+	int32 GrenadeCount = 0;
+	for (int32 i = 0; i < Loadout.GrenadeSlotsCount; i++)
+	{
+		UBpGameplayHelperLib::SpawnTacticalItem(&SpawnedGear.Grenades[i], Loadout.GrenadeSlots[i], this, true, GrenadeCount);
+		GrenadeCount = i;
+	}
+}
+
+void APlayerCharacter::TacticalReload()
+{
+	if (IsCarried() || IsCarrying())
+		return;
+
+	if (IsArrested())
+	{
+		return;
+	}
+
+	if (GetEquippedItem() && GetEquippedItem()->IsCurrentlyReloading())
+	{
+		GetEquippedItem()->CancelCurrentReloadAction(true);
+		return;
+	}
+
+	GetWorld()->GetTimerManager().ClearTimer(ReloadOrMagCheck_Handle);
+
+	if (IsAnimationBlocking())
+		return;
+
+	if (!GetEquippedItem())
+		return;
+
+	GetEquippedItem()->CancelCurrentReloadAction(false);
+
+	ABaseMagazineWeapon* bmw = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+	if (bmw)
+	{
+		// TODO(killo): this should be controlled from bmw, not in player
+		if (bmw->bTacReloadWhenEmpty && bmw->GetAmmo() <= 1)
+		{
+			Reload();
+			return;
+		}
+		
+		bmw->OnWeaponTacticalReload();
+	}
+
+	ABallisticsShield* bs = Cast<ABallisticsShield>(GetEquippedItem());
+	if (bs)
+	{
+		bs->OnItemReload();
+	}
+
+	OnWeaponReload.Broadcast(this);
+	OnWeaponTacticalReload.Broadcast(this);
+}
+
+void APlayerCharacter::MagCheck()
+{
+	if (IsCarried() || IsCarrying())
+		return;
+
+	if (IsArrested())
+		return;
+	
+	if (!GetEquippedItem())
+		return;
+
+	// Ignore mag checks for ballistic shields
+	ABallisticsShield* BallisticShield = Cast<ABallisticsShield>(GetEquippedItem());
+	if (BallisticShield)
+		return;
+	
+	if (GetEquippedItem()->IsCurrentlyReloading())
+	{
+		GetEquippedItem()->CancelCurrentReloadAction(true);
+		return;
+	}
+	GetEquippedItem()->CancelCurrentReloadAction(false);
+
+	if (IsAnimationBlocking())
+		return;
+
+	bWeaponDown3P = false;
+
+	ABaseMagazineWeapon* bmw = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+	if (bmw)
+	{
+		bmw->MagCheck();
+
+		OnWeaponMagCheck.Broadcast(bmw);
+	}
+}
+
+bool APlayerCharacter::IsFireModeSelectPlaying() const
+{
+	if (GetEquippedItem())
+	{
+		if (GetEquippedItem()->AnimationData)
+		{
+			return Is1PMontagePlaying(GetEquippedItem()->AnimationData->FireSelect_Auto.Body_FP) ||
+					Is1PMontagePlaying(GetEquippedItem()->AnimationData->FireSelect_Burst.Body_FP) ||
+					Is1PMontagePlaying(GetEquippedItem()->AnimationData->FireSelect_Semi.Body_FP) ||
+					Is1PMontagePlaying(GetEquippedItem()->AnimationData->FireSelect_Safe.Body_FP) ||
+					Is1PMontagePlaying(GetEquippedItem()->AnimationData->Crouch_FireSelect_Auto.Body_FP) ||
+					Is1PMontagePlaying(GetEquippedItem()->AnimationData->Crouch_FireSelect_Burst.Body_FP) ||
+					Is1PMontagePlaying(GetEquippedItem()->AnimationData->Crouch_FireSelect_Semi.Body_FP) ||
+					Is1PMontagePlaying(GetEquippedItem()->AnimationData->Crouch_FireSelect_Safe.Body_FP);
+		}
+	}
+
+	return false;
+}
+
+bool APlayerCharacter::IsMagCheckPlaying() const
+{
+	if (GetEquippedItem())
+	{
+		if (GetEquippedItem()->AnimationData)
+		{
+			return Is1PMontagePlaying(GetEquippedItem()->AnimationData->MagazineCheck.Body_FP) ||
+					Is1PMontagePlaying(GetEquippedItem()->AnimationData->Crouch_MagazineCheck.Body_FP);
+		}
+	}
+
+	return false;
+}
+
+void APlayerCharacter::Server_MarkWeaponCleaned_Implementation(ABaseItem* Item)
+{
+	if (Item)
+	{
+		Item->bHasBeenCleared = true;
+		Item->ItemMesh->HideBoneByName("tag_mag_01", PBO_Term);
+		Item->bNoPickup = true;
+	}
+}
+
+bool APlayerCharacter::Server_MarkWeaponCleaned_Validate(ABaseItem* Item)
+{
+	return true;
+}
+
+FGenericTeamId APlayerCharacter::GetGenericTeamId() const
+{
+	return TeamId;
+}
+
+void APlayerCharacter::MoveForward(float Value)
+{
+	MoveForwardInput = Value;
+
+	if (bMovementLocked || bFreeLeaning || (IsArrested()))
+		return;
+	
+	if (Value != 0.0f)
+	{
+		if ((GetEquippedItem() && !GetEquippedItem()->ConsumeMovementForward(Value)) || !GetEquippedItem())
+		{
+			const bool bIsMovingForward = MoveForwardInput > 0.0f;
+
+			const float StrafeScale = (bIsMovingForward ? ForwardStrafeSpeedMultiplier : BackwardStrafeSpeedMultiplier) * (bIsLeaning ? LeanSpeedMultiplier : 1.0f);
+
+			// Calcuate leg movement scale based on leg ticket health
+			// Less tickets, slower movement (clamped to 0.25). More tickets, faster movement (clamped to 1.0)
+			const int32 MaxLegTickets = FMath::Max(CharacterHealth->GetLimb_Const(ELimbType::LT_LeftLeg).GetMaxTickets(), CharacterHealth->GetLimb_Const(ELimbType::LT_RightLeg).GetMaxTickets()); 
+			const int32 MinLegTicketsRemaining = FMath::Min(CharacterHealth->GetLimb_Const(ELimbType::LT_LeftLeg).GetRemainingTickets(), CharacterHealth->GetLimb_Const(ELimbType::LT_RightLeg).GetRemainingTickets()); 
+			const float LimbScale = (MaxLegTickets - MinLegTicketsRemaining) * SpeedPercentLossPerLegInjury; // Lose 5% speed per leg injury. Stacks only 'MaxTickets' times
+
+			const float CarryScale = IsCarrying() ? SpeedPercentLossWhenCarrying : 0.0f; // 10% slow down when carrying someone
+			
+			const float FinalMovementScale = FMath::Clamp(StrafeScale - LimbScale - CarryScale, 0.25f, 1.0f);
+			
+			AddMovementInput(FRotator(0, GetControlRotation().Yaw, 0).Vector(), Value * FinalMovementScale);
+			
+			if (APlayerController* PlayerController = Cast<APlayerController>(GetController()))
+			{
+				PlayerController->ClientStartCameraShake(ForwardShake, GetVelocity().Size2D() * 0.001f * GetMesh1P()->GetComponentScale().X);
+			}
+		}
+	}
+}
+
+void APlayerCharacter::MoveRight(float Value)
+{
+	// needed for roll in fp graph
+	MoveRightInput = Value;
+	
+	if (bMovementLocked || bFreeLeaning || (IsArrested()))
+		return;
+
+	if (Value != 0.0f)
+	{
+		//Value = FMath::Clamp(Value, -0.9f, 0.9f);
+		if ((GetEquippedItem() && !GetEquippedItem()->ConsumeMovementRight(Value)) || !GetEquippedItem())
+		{			
+			const float StrafeScale = SideStrafeSpeedMultiplier * (bIsLeaning ? LeanSpeedMultiplier : 1.0f);
+
+			// Calcuate leg movement scale based on leg ticket health
+			// Less tickets, slower movement (clamped to 0.25). More tickets, faster movement (clamped to 1.0)
+			const int32 MaxLegTickets = FMath::Max(CharacterHealth->GetLimb_Const(ELimbType::LT_LeftLeg).GetMaxTickets(), CharacterHealth->GetLimb_Const(ELimbType::LT_RightLeg).GetMaxTickets()); 
+			const int32 MinLegTicketsRemaining = FMath::Min(CharacterHealth->GetLimb_Const(ELimbType::LT_LeftLeg).GetRemainingTickets(), CharacterHealth->GetLimb_Const(ELimbType::LT_RightLeg).GetRemainingTickets()); 
+			const float LimbScale = (MaxLegTickets - MinLegTicketsRemaining) * SpeedPercentLossPerLegInjury; // Lose x% speed per leg injury. Stacks only 'MaxTickets' times
+
+			const float CarryScale = IsCarrying() ? SpeedPercentLossWhenCarrying : 0.0f; // 10% slow down when carrying someone
+
+			const float FinalMovementScale = FMath::Clamp(StrafeScale - LimbScale - CarryScale, 0.25f, 1.0f);
+			
+			AddMovementInput(UKismetMathLibrary::GetRightVector(FRotator(0, GetControlRotation().Yaw, 0)), Value * FinalMovementScale);
+			
+			if (APlayerController* PlayerController = Cast<APlayerController>(GetController()))
+			{
+				PlayerController->ClientStartCameraShake(RightShake, GetVelocity().Size2D() * 0.001f * GetMesh1P()->GetComponentScale().X);
+			}
+		}
+	}
+}
+
+void APlayerCharacter::TurnAtRate(float Rate)
+{
+	if (bAimLocked)
+		return;
+
+	// calculate delta for this frame from the rate information
+	AddYaw(fabs(Rate)*Rate * 250.0f * GetWorld()->GetDeltaSeconds());
+}
+
+void APlayerCharacter::AddYaw(float Rate)
+{
+	// alex: added to limit yaw in lean!
+	// todo better limiting
+	if (bFreeLeaning)
+	{
+		Rate *= 1.0f - FMath::Clamp(UKismetMathLibrary::NormalizeToRange(FMath::Abs(LeanTempYawCache.Yaw), 0.0f, 100.0f), 0.0f, 0.75f);
+		LeanTempYawCache.Yaw += Rate;
+		if (LeanTempYawCache.Yaw <= -70.0f || LeanTempYawCache.Yaw >= 70.0f)
+		{
+			LeanTempYawCache.Yaw = FMath::Clamp(LeanTempYawCache.Yaw, -70.0f, 71.0f);
+			return; 
+		}
+	} 
+	else
+	{
+		LeanTempYawCache = FRotator(0,0,0);
+	}
+
+	//GEngine->AddOnScreenDebugMessage(1446, 0.1f, FColor::White, "AddYawCalled0 ");
+	if (bAimLocked && !bFreelooking)
+		return;
+
+	//GEngine->AddOnScreenDebugMessage(1447, 0.1f, FColor::White, "AddYawCalled1 ");
+	if (bStunAimLocked && !bFreelooking)
+		return;
+
+	//GEngine->AddOnScreenDebugMessage(1448, 0.1f, FColor::White, "AddYawCalled2 ");
+
+	if (bInCommandMenu)
+		return;
+
+	if (bItemWheelActive)
+		return;
+
+	if (bCommandWheelActive && (HumanCharacterWidget_V2 == nullptr || HumanCharacterWidget_V2->GetCommandWheel() == nullptr || !HumanCharacterWidget_V2->GetCommandWheel()->IsInFreeView()))
+		return;
+
+	ABaseItem* bi = Cast<ABaseItem>(GetEquippedItem());
+	if (bi)
+	{
+		if (bi->ConsumeMouseMovement(FRotator(0, Rate, 0)))
+			return;
+	}
+
+	const bool bUsingGamepad = UReadyOrNotFunctionLibrary::IsUsingGamepad(GetRONPlayerController());
+	
+	if (bUsingGamepad) 
+	{
+		if(bAiming)
+		{
+			Rate = Rate * GamepadLookSensitivity * 0.5f; 
+		}
+		else
+		{
+			Rate = Rate * GamepadLookSensitivity; 
+		}
+		if (bInvertGamepadHorizontal)
+		{
+			Rate = Rate * -1.0f;
+		}
+	}
+	else
+	{
+		Rate = Rate * Sensitivity;
+		if (bInvertYaw)
+		{
+			Rate = Rate * -1.0f;
+		}
+	}
+
+	if (Rate < 0.0f)
+	{
+		Rate *= SprintMaxTurnRateLeft;
+	}
+	else
+	{
+		Rate *= SprintMaxTurnRateRight;
+	}
+	if (IsSprinting() && !bFreelooking)
+	{
+		const float DeltaRate = FMath::Abs(Rate * GetWorld()->GetDeltaSeconds());
+		if (Rate < 0.0f)
+		{
+			SprintMaxTurnRateLeft -= DeltaRate;
+			SprintMaxTurnRateRight += DeltaRate * 0.5f;
+			
+		}
+		else
+		{
+			SprintMaxTurnRateRight -= DeltaRate;
+			SprintMaxTurnRateLeft += DeltaRate * 0.5f;
+		}
+		SprintMaxTurnRateRight = FMath::Clamp(SprintMaxTurnRateRight, 0.1f, 1.0f);
+		SprintMaxTurnRateLeft = FMath::Clamp(SprintMaxTurnRateLeft, 0.1f, 1.0f);
+
+	}
+	
+	if (bFreelooking)
+	{
+		float FreelookSensitivity = 1.0f;
+
+		if (UBpGameplayHelperLib::GetFreelookSensitivity(FreelookSensitivity))
+		{
+			Rate *= FreelookSensitivity;
+		}
+
+		const float NewYaw = FRotator::NormalizeAxis(FreeLookStartRotation.Yaw - (GetControlRotation().Yaw + Rate));
+		if (Rate > 0.0f && NewYaw < -70.0f)
+		{
+			return;
+		}
+
+		if (Rate < 0.0f && NewYaw > 70.0f)
+		{
+			return;
+		}
+	}
+
+	// Add any contribution from aim assist
+	float AimAssistYaw = 1.0f;
+	if(const AReadyOrNotPlayerController* PlayerController = GetRONPlayerController())
+	{
+		AimAssistYaw = PlayerController->AimAssistYaw;
+	}
+	Rate *= AimAssistYaw;
+	
+	AddControllerYawInput(Rate);
+	//Camera_RotationRate.Yaw = FMath::Clamp(Camera_RotationRate.Yaw + Rate * ViewBlendMultiplier, -1.0f, 1.0f);
+
+	if (!bFreelooking)
+	{
+		Camera_RotationRate.Yaw = FMath::FInterpTo(Camera_RotationRate.Yaw + Rate * ViewBlendMultiplier, 0, GetWorld()->GetDeltaSeconds(), 6.0f);
+
+		// free aim caching
+		if (Rate != 0.0f)
+		{
+			FreeAimCache.Yaw += Rate;
+			TimeSinceLastYawInput = 0.0f;
+		}
+		else
+		{
+			TimeSinceLastYawInput += GetWorld()->GetDeltaSeconds();
+			if (!bAiming)
+			{
+				//FreeAimCache.Yaw = FMath::FInterpTo(FreeAimCache.Yaw, 0.0f, GetWorld()->GetDeltaSeconds(), TimeSinceLastYawInput * 30.0f);
+			}
+		}
+	}
+	else
+	{
+		FreeLookCache.Yaw = FMath::Clamp(FreeLookCache.Yaw + Rate, FreelookSetting.YawMin, FreelookSetting.YawMax);
+		//GEngine->AddOnScreenDebugMessage(1445, 5.0f, FColor::White, "FreeLookCache: " + FreeLookCache.ToString());
+	}
+}
+
+void APlayerCharacter::LookUpAtRate(float Rate)
+{
+	if (bAimLocked)
+		return;
+
+	// calculate delta for this frame from the rate information
+	AddPitch(fabs(Rate)*Rate * 250.0f * GetWorld()->GetDeltaSeconds());
+}
+
+void APlayerCharacter::AddPitch(float Rate)
+{
+	if (bAimLocked || bStunAimLocked)
+		return;
+
+	if (bInCommandMenu)
+		return;
+
+	if (bItemWheelActive)
+		return;
+	
+	if (bCommandWheelActive && (HumanCharacterWidget_V2 == nullptr || HumanCharacterWidget_V2->GetCommandWheel() == nullptr || !HumanCharacterWidget_V2->GetCommandWheel()->IsInFreeView()))
+		return;
+	
+	ABaseItem* bi = Cast<ABaseItem>(GetEquippedItem());
+	if (bi)
+	{
+		if (bi->ConsumeMouseMovement(FRotator(Rate, 0, 0)))
+			return;
+	}
+	
+	const bool bUsingGamepad = UReadyOrNotFunctionLibrary::IsUsingGamepad(GetRONPlayerController());
+	
+	if (bUsingGamepad)
+	{
+		Rate = Rate * GamepadLookSensitivity;
+		if (bInvertGamepadVertical)
+		{
+			Rate = Rate * -1.0f;
+		}
+	}
+	else
+	{
+		Rate = Rate * Sensitivity;
+		if (bInvertPitch)
+		{
+			Rate = Rate * -1.0f;
+		}
+	}
+
+	if (bFreelooking)
+	{
+		float FreelookSensitivity = 1.0f;
+
+		if (UBpGameplayHelperLib::GetFreelookSensitivity(FreelookSensitivity))
+		{
+			Rate *= FreelookSensitivity;
+		}
+		const float NewPitch = FRotator::NormalizeAxis((FreeLookStartRotation.Pitch - (GetControlRotation().Pitch + Rate)));
+
+		if (Rate < 0.0f && NewPitch < -45.0f)
+		{
+			return;
+		}
+
+		if (Rate > 0.0f && NewPitch > 20.0f)
+		{
+			return;
+		}
+	}
+
+	FRotator NewRot = GetControlRotation();
+	NewRot.Pitch -= Rate;
+	NewRot.Normalize();
+	bool bPitchChanged = true;
+	if ((NewRot.Pitch > 70.0f && Rate < 0.0f) || (NewRot.Pitch < -70.0f && Rate > 0.0f))
+	{
+		bPitchChanged = false;
+	}
+
+	NewRot = GetControlRotation();
+	NewRot.Pitch += Rate;
+	NewRot.Normalize();
+
+	if ((NewRot.Pitch < -72.0f && Rate > 0.0f) || (NewRot.Pitch > 80.0f && Rate < 0.0f) || (NewRot.Pitch > -80.0f || NewRot.Pitch < 85.0f))
+	{
+		if (Rate == 0.0f)
+			return;
+		
+		// Add any contribution from aim assist
+		float AimAssistPitch = 1.0f;
+		if(const AReadyOrNotPlayerController* PlayerController = GetRONPlayerController())
+		{
+			AimAssistPitch = PlayerController->AimAssistPitch;
+		}
+		Rate *= AimAssistPitch;
+		AddControllerPitchInput(Rate);
+	} 
+	
+	if (!bFreelooking)
+	{
+		if (bPitchChanged)
+		{
+			//Camera_RotationRate.Pitch = FMath::Clamp(Camera_RotationRate.Pitch + Rate * ViewBlendMultiplier, -1.0f, 3.0f);
+			Camera_RotationRate.Pitch = FMath::FInterpTo(Camera_RotationRate.Pitch + Rate * ViewBlendMultiplier, 0, GetWorld()->GetDeltaSeconds(), 6.0f);
+		}
+
+		// free aim caching
+		if (Rate != 0.0f && bPitchChanged)
+		{
+			FreeAimCache.Pitch += Rate;
+			TimeSinceLastPitchInput = 0.0f;
+		}
+		else
+		{
+			TimeSinceLastPitchInput += GetWorld()->GetDeltaSeconds();
+
+			if (!bAiming)
+			{
+				//FreeAimCache.Pitch = FMath::FInterpTo(FreeAimCache.Pitch, 0.0f, GetWorld()->GetDeltaSeconds(), TimeSinceLastPitchInput * 30.0f);
+			}
+		}
+	}
+	else
+	{
+		FreeLookCache.Pitch = FMath::Clamp(FreeLookCache.Pitch - Rate, FreelookSetting.PitchMin, FreelookSetting.PitchMax);
+		ClampFreelookRotation();
+		//FreeLookCache.Pitch -= Rate;
+	}
+}
+
+void APlayerCharacter::Server_PlayVaultAnimation_Implementation(FVector ledge, FVector legeWallNormal, FVector ledgeTraceDown, float ledgeZ, ELedgeWidth ledgeWidth, ELedgeHeight ledgeheight)
+{
+	PlayVaultAnimation(ledge, LedgeWallNormal, ledgeTraceDown, ledgeZ, LedgeWidth, ledgeheight);
+}
+
+bool APlayerCharacter::Server_PlayVaultAnimation_Validate(FVector ledge, FVector legeWallNormal, FVector ledgeTraceDown, float ledgeZ, ELedgeWidth ledgeWidth, ELedgeHeight ledgeheight)
+{
+	return true;
+}
+
+
+void APlayerCharacter::SetFreelookPitchMax(const float NewPitchMaxValue)
+{
+	FreelookSetting.PitchMax = NewPitchMaxValue;
+}
+
+void APlayerCharacter::SetFreelookPitchMin(const float NewPitchMinValue)
+{
+	FreelookSetting.PitchMin = NewPitchMinValue;
+}
+
+void APlayerCharacter::SetFreelookYawMax(const float NewYawMaxValue)
+{
+	FreelookSetting.YawMax = NewYawMaxValue;
+}
+
+void APlayerCharacter::SetFreelookYawMin(const float NewYawMinValue)
+{
+	FreelookSetting.YawMin = NewYawMinValue;
+}
+
+void APlayerCharacter::DoVaultTraces()
+{
+	// not used anywhere
+	/*if (!IsLocalPlayer())
+		return;
+
+	bLedgeFound = false;
+
+	SCOPE_CYCLE_COUNTER(STAT_VaultTraces);
+	
+	const FCollisionQueryParams CollisionQueryParams = CreateStandardCollisionParams();
+	
+	const FVector ForwardTraceStart = GetMesh()->GetSocketLocation("VaultTraceForward");
+	const FVector ForwardTraceEnd = GetCapsuleComponent()->GetForwardVector() * 100.0f + ForwardTraceStart;
+
+	const FName VaultProfile = FName("Vault");
+
+	GetWorld()->LineTraceSingleByProfile(VaultTraceForward, ForwardTraceStart, ForwardTraceEnd, VaultProfile, CollisionQueryParams);
+
+	//DrawDebugLine(GetWorld(), ForwardTraceStart, ForwardTraceEnd, VaultTraceForward.bBlockingHit ? FColor::Red : FColor::Green, false, -1.0f, 1.0f, 1.0f);
+
+	if (VaultTraceForward.bBlockingHit)
+	{
+		UStaticMeshComponent* HitStaticMeshComponent = Cast<UStaticMeshComponent>(VaultTraceForward.GetComponent());
+		if (HitStaticMeshComponent)
+		{
+			if (HitStaticMeshComponent->GetCollisionProfileName() == VaultProfile && FMath::IsNearlyEqual(FVector::DotProduct(VaultTraceForward.Normal, FVector(0.0, 0.0, 1.0f)), 0.0f, 0.05f))
+			{
+				LedgeTraceDown = VaultTraceForward.ImpactPoint;
+				LedgeWallNormal = VaultTraceForward.Normal;
+				
+				const FVector VaultTraceDownCloseStart = LedgeTraceDown + FVector(0.0, 0.0, 400.0f) - (LedgeWallNormal * 10.0f);
+				const FVector VaultTraceDownCloseEnd = (LedgeTraceDown - LedgeWallNormal * 10.0f) - FVector(0.0f, 0.0f, 400.0f);
+				
+				GetWorld()->LineTraceSingleByProfile(VaultTraceDownClose, VaultTraceDownCloseStart, VaultTraceDownCloseEnd, VaultProfile, CollisionQueryParams);
+				
+				//DrawDebugLine(GetWorld(), VaultTraceDownCloseStart, VaultTraceDownCloseEnd, VaultTraceDownClose.bBlockingHit ? FColor::Red : FColor::Green, false, -1.0f, 0.0f, 1.0f);
+				
+				bLedgeFound = !(VaultTraceDownClose.Location - VaultTraceDownClose.TraceStart).IsNearlyZero(0.0001);
+
+				if (bLedgeFound)
+				{
+					Ledge = FVector(LedgeTraceDown.X, LedgeTraceDown.Y, VaultTraceDownClose.Location.Z);
+					LedgeZ = Ledge.Z - GetCharacterMovement()->GetActorFeetLocation().Z;
+
+					#if WITH_EDITOR
+					ULog::Info("Ledge Found");
+					#endif
+					
+					//GEngine->AddOnScreenDebugMessage(7854, 1.0f, FColor::White, "Ledge Found! Ledge: " + Ledge.ToString() + " Height: " + 
+					//	FString::SanitizeFloat(LedgeZ) + "(ActorZ: " + FString::SanitizeFloat(GetCharacterMovement()->GetActorFeetLocation().Z) + ", Ledge Z: " + FString::SanitizeFloat(Ledge.Z) + ")");
+				}
+
+				const FVector VaultTraceDownMiddleStart = LedgeTraceDown + FVector(0.0, 0.0, 400.0f) - (LedgeWallNormal * 45.0f);
+				const FVector VaultTraceDownMiddleEnd = (LedgeTraceDown - LedgeWallNormal * 45.0f) - FVector(0.0f, 0.0f, 400.0f);
+				
+				GetWorld()->LineTraceSingleByProfile(VaultTraceDownMiddle, VaultTraceDownMiddleStart, VaultTraceDownMiddleEnd, VaultProfile, CollisionQueryParams);
+				
+				//DrawDebugLine(GetWorld(), VaultTraceDownMiddleStart, VaultTraceDownMiddleEnd, VaultTraceDownMiddle.bBlockingHit ? FColor::Red : FColor::Green, false, -1.0f, 0.0f, 1.0f);
+				
+				const FVector VaultTraceDownFarStart = LedgeTraceDown + FVector(0.0, 0.0, 400.0f) - (LedgeWallNormal * 100.0f);
+				const FVector VaultTraceDownFarEnd = (LedgeTraceDown - LedgeWallNormal * 100.0f) - FVector(0.0f, 0.0f, 400.0f);
+				GetWorld()->LineTraceSingleByProfile(VaultTraceDownFar, VaultTraceDownFarStart, VaultTraceDownFarEnd, VaultProfile, CollisionQueryParams);
+				
+				//DrawDebugLine(GetWorld(), VaultTraceDownFarStart, VaultTraceDownFarEnd, VaultTraceDownFar.bBlockingHit ? FColor::Red : FColor::Green, false, -1.0f, 0.0f, 1.0f);
+
+				// first check if this is a continuous ledge
+				if (FMath::IsNearlyEqual(Ledge.Z, VaultTraceDownFar.Location.Z, 10.0f))
+				{
+					LedgeWidth = ELedgeWidth::LW_Ledge;
+				}
+				else
+				{
+					// otherwise check if this is a small ledge or big one
+					if (FMath::IsNearlyEqual(Ledge.Z, VaultTraceDownMiddle.Location.Z, 10.0f))
+					{
+						LedgeWidth = ELedgeWidth::LW_Fall; // small one here
+					}
+					else
+					{
+						LedgeWidth = ELedgeWidth::LW_Rail; // big one here
+					}
+				}
+
+				/*
+				if (UKismetMathLibrary::NearlyEqual_FloatFloat(Ledge.Z, VaultTraceDownFar.Location.Z, 10.0f))
+				{
+					LedgeWidth = ELedgeWidth::LW_Ledge;
+				}
+				else if (UKismetMathLibrary::InRange_FloatFloat(VaultTraceDownFar.Location.Z, Ledge.Z - 600.0f, Ledge.Z - 10.0f))
+				{
+					LedgeWidth = ELedgeWidth::LW_Rail;
+				}
+				else if (VaultTraceDownFar.Location.Z < Ledge.Z - 600.0f)
+				{
+					LedgeWidth = ELedgeWidth::LW_Fall;
+				}
+				#1#
+
+				if (bLedgeFound)
+				{
+					if (UKismetMathLibrary::InRange_FloatFloat(LedgeZ, 0.0f, 20.0f))
+					{
+						LedgeHeight = ELedgeHeight::LH_Step;
+					}
+					else if (UKismetMathLibrary::InRange_FloatFloat(LedgeZ, 0.0f, 70.0f))
+					{
+						LedgeHeight = ELedgeHeight::LH_Vault;
+					}
+					else if (UKismetMathLibrary::InRange_FloatFloat(LedgeZ, 0.0f, 100.0f))
+					{
+						LedgeHeight = ELedgeHeight::LH_Mantle;
+					}
+					else
+					{
+						bLedgeFound = false;
+					}
+					
+				}	
+
+				#if WITH_EDITOR
+				ULog::Info("Final Results! LedgeHeight: " + FString::FromInt(uint8(LedgeHeight)) + ", LedgeWidth: " + FString::FromInt(uint8(LedgeWidth)));
+				#endif
+				
+				//GEngine->AddOnScreenDebugMessage(7855, 1.0f, FColor::White, "Final Results! LedgeHeight: " + FString::FromInt((uint8)LedgeHeight) + " LedgeWidth: " + FString::FromInt((uint8)LedgeWidth));
+			}
+		}
+	}*/
+}
+
+void APlayerCharacter::PlayerJump()
+{
+	#ifndef RON_NO_JUMP
+	if (GetEquippedItem() && !GetEquippedItem()->ConsumeJumpInput() && !bMovementLocked && !bArrestComplete && !bIsBeingArrested && !IsDowned())
+	{
+		if (!bVaulting)
+		{
+			if (bLedgeFound && !GetCharacterMovement()->IsFalling())
+			{
+				if (!IsAnimationBlocking())
+				{
+					PlayVaultAnimation(Ledge, LedgeWallNormal, LedgeTraceDown, LedgeZ, LedgeWidth, LedgeHeight);
+					Server_PlayVaultAnimation(Ledge, LedgeWallNormal, LedgeTraceDown, LedgeZ, LedgeWidth, LedgeHeight);
+				}
+			}
+			else
+			{
+				Jump();
+			}		
+		}
+	}
+	#endif
+}
+
+void APlayerCharacter::PlayerStopJumping()
+{
+	StopJumping();
+}
+
+void APlayerCharacter::Jump()
+{
+	#ifndef RON_NO_JUMP
+	if (IsCarried() || IsCarrying())
+		return;
+	
+	if (bMovementLocked || bIsCrouched || JumpDelayTimer > 0.0f || IsLimbHit(ELimbType::LT_LeftLeg) || IsLimbHit(ELimbType::LT_RightLeg))
+	{
+		return;
+	}
+	
+	OnJumpStart();
+
+	Super::Jump();
+	JumpDelayTimer = 2.0f;
+	#endif
+}
+
+void APlayerCharacter::StopJumping()
+{
+	if (bMovementLocked || bIsCrouched)
+	{
+		return;
+	}
+	Super::StopJumping();
+}
+
+bool APlayerCharacter::CanUseIncrementalSystem_Implementation() const
+{
+	// ##UE5UPGRADE## Fix
+	// #if !UE_BUILD_SHIPPING
+	// if (UDevMenuFunctionLibrary::IsDevMenuOpen())
+	// 	return false;
+	// #endif
+	
+	return !(bArrestComplete || bIsBeingArrested || bHoldingSprint || bInDevicesMenu || bInTabMenu || bMirroring);
+}
+
+void APlayerCharacter::IncrementalUse(const float Val)
+{
+#ifdef RON_NO_INCREMENTAL_SPEED
+	return;
+#else
+	// ##UE5UPGRADE## Fix
+	// #if !UE_BUILD_SHIPPING
+	// if (UDevMenuFunctionLibrary::IsDevMenuOpen())
+	// 	return;
+	// #endif
+	
+	if (!CanUseIncrementalSystem())
+	{
+		return;
+	}
+
+	if (Val != 0.0f)
+	{
+		float ModifiedVal = Val;
+		ModifiedVal *= 25.0f * GetWorld()->GetDeltaSeconds();
+
+		if ((GetEquippedItem() && !GetEquippedItem()->ConsumeIncrementalUse(ModifiedVal)) || !GetEquippedItem())
+		{
+			const float MaxSpeed = MaxRunSpeedPercent;
+			// Clamp speed to minimum and maximum.
+			CurrentRunSpeedPercent = FMath::Clamp(CurrentRunSpeedPercent + Val * SpeedBubbleAmount, MinWalkSpeedPercent, MaxSpeed);
+
+			if (bAiming)
+			{
+				CurrentRunSpeedPercent = FMath::Clamp(CurrentRunSpeedPercent, 0.0f, SpeedModifier_Aim);
+			}
+
+			// Update the walking speed.
+			// FIXME: use less calls here
+			LastSetRunSpeed = CurrentRunSpeedPercent;
+			Server_UpdateLastSetRunSpeed(CurrentRunSpeedPercent);
+			SetRunSpeed(CurrentRunSpeedPercent);
+		}
+		else
+		{
+			CurrentRunSpeedPercent = 0.5f;
+			SetRunSpeed(CurrentRunSpeedPercent);
+		}
+	}
+#endif
+}
+
+void APlayerCharacter::Drone_MoveForward(float Val)
+{
+	AQuadrotor* Quadrotor = Cast<AQuadrotor>(GetEquippedItem());
+	if (Quadrotor)
+	{
+		if (Quadrotor->ConsumeMovementForward(0.0f))
+		{
+			Quadrotor->SpawnedDrone->DroneForward(Val);
+		}
+	}
+}
+
+void APlayerCharacter::Drone_Right(float Val)
+{
+	AQuadrotor* Quadrotor = Cast<AQuadrotor>(GetEquippedItem());
+	if (Quadrotor)
+	{
+		if (Quadrotor->ConsumeMovementRight(0.0f))
+		{
+			Quadrotor->SpawnedDrone->DroneRight(Val);
+		}
+	}
+}
+
+void APlayerCharacter::Drone_Throttle(float Val)
+{
+	AQuadrotor* Quadrotor = Cast<AQuadrotor>(GetEquippedItem());
+	if (Quadrotor)
+	{
+		if (Quadrotor->ConsumeMovementForward(Val))
+		{
+			Quadrotor->SpawnedDrone->DroneThrottle(Val);
+		}
+	}
+}
+
+void APlayerCharacter::Drone_Yaw(float Val)
+{
+	AQuadrotor* Quadrotor = Cast<AQuadrotor>(GetEquippedItem());
+	if (Quadrotor)
+	{
+		if (Quadrotor->ConsumeLeanInput(0.0f))
+		{
+			Quadrotor->SpawnedDrone->DroneYaw(Val);
+		}
+	}
+}
+
+void APlayerCharacter::Drone_Steady()
+{
+	AQuadrotor* Quadrotor = Cast<AQuadrotor>(GetEquippedItem());
+	if (Quadrotor)
+	{
+		if (Quadrotor->ConsumeJumpInput())
+		{
+			Quadrotor->SpawnedDrone->bSteadyDrone = !Quadrotor->SpawnedDrone->bSteadyDrone;
+			if (!Quadrotor->SpawnedDrone->bSteadyDrone)
+			{
+				Quadrotor->SpawnedDrone->TargetRotation.Pitch = 0.0f;
+			}
+		}
+	}
+}
+
+void APlayerCharacter::Walk()
+{
+#ifdef RON_NO_SPRINT
+	EndFastWalk();
+#else
+	if ((!bWalking && GetEquippedItem() && !GetEquippedItem()->ConsumeSprintInput()) || !GetEquippedItem())
+	{
+		bWalking = true;
+		CurrentRunSpeedPercent = LastSetRunSpeed;
+		Server_UpdateLastSetRunSpeed(CurrentRunSpeedPercent);
+
+		SetRunSpeed(CurrentRunSpeedPercent);
+	}
+
+	bHoldingSprint = false;
+
+	if (GetLocalRole() < ROLE_Authority)
+		Server_Walk();
+#endif
+}
+
+void APlayerCharacter::ToggleWalk()
+{
+	bHoldingFastWalk = !bHoldingFastWalk;
+}
+
+void APlayerCharacter::Server_Walk_Implementation()
+{
+	Walk();
+}
+
+void APlayerCharacter::Server_ToggleWalk_Implementation()
+{
+	ToggleWalk();
+}
+
+void APlayerCharacter::Sprint()
+{	
+#ifdef RON_NO_SPRINT
+	FastWalk();
+#else
+	if (bDisableSprinting)
+		return;
+		
+	if (Cast<ABallisticsShield>(GetEquippedItem()))
+	{
+		return;
+	}
+
+	if (IsArrested() || GetCharacterMovement()->IsFalling())
+	{
+		return;
+	}
+
+	if (IsAnimationBlocking())
+	{
+		return;
+	}
+
+	if ((GetEquippedItem() && !GetEquippedItem()->ConsumeSprintInput()) || !GetEquippedItem())
+	{
+		bWalking = false;
+		LastSetRunSpeed = CurrentRunSpeedPercent;
+		Server_UpdateLastSetRunSpeed(LastSetRunSpeed);
+
+		CurrentRunSpeedPercent = MaxRunSpeedPercent; //note: was 1.0f
+		SetRunSpeed(MaxRunSpeedPercent); //note: was 1.0f
+	}
+
+	//GEngine->AddOnScreenDebugMessage(-1, 0.0f, FColor::Purple, "Sprinting!");
+
+	bLeanLeftToggle = bLeanRightToggle = false;
+	bHoldingSprint = true;
+	SprintSpeedRampUpMultiplier = SpeedModifier_Sprint;
+
+	if (GetLocalRole() < ROLE_Authority)
+		Server_Sprint();
+#endif
+}
+
+void APlayerCharacter::FastWalk()
+{
+	Server_FastWalk_Implementation();
+	Server_FastWalk();
+}
+
+void APlayerCharacter::EndFastWalk()
+{
+	Server_EndFastWalk_Implementation();
+	Server_EndFastWalk();
+}
+
+void APlayerCharacter::Server_FastWalk_Implementation()
+{
+	bHoldingFastWalk = true;
+}
+
+bool APlayerCharacter::Server_FastWalk_Validate()
+{
+	return true;
+}
+
+void APlayerCharacter::Server_EndFastWalk_Implementation()
+{
+	bHoldingFastWalk = false;
+}
+
+bool APlayerCharacter::Server_EndFastWalk_Validate()
+{
+	return true;
+}
+
+bool APlayerCharacter::GetFMODFootstepParameters(int32& Stance, int32& Speed, int32& Surface)
+{
+	if (GetCharacterMovement()->IsCrouching() || IsCrouching())
+	{
+		Stance = 1; // crouch
+	}
+	else if (bHoldingFastWalk)
+	{
+		Stance = 2; // walk
+	}
+	else
+	{
+		Stance = 3; // normal
+	}
+	
+	return Super::GetFMODFootstepParameters(Stance, Speed, Surface);
+}
+
+void APlayerCharacter::TryRepeatSprint()
+{
+	if (!IsSprinting())
+	{
+		Sprint();
+	}
+}
+
+void APlayerCharacter::Server_Sprint_Implementation()
+{
+	Sprint();
+}
+
+void APlayerCharacter::ToggleSprint()
+{
+	if (bIsCollectingEvidence)
+		return;
+
+	if (GetEquippedItem() && GetEquippedItem()->ConsumeSprintInput())
+	{
+		return;
+	}
+
+	if (bWalking)
+	{
+		Sprint();
+	}
+	else
+	{
+		Walk();
+	}
+}
+
+void APlayerCharacter::ToggleCrouch()
+{
+	if (GetEquippedItem() && GetEquippedItem()->ConsumeCrouchInput())
+		return;
+
+	bWantsToCrouch = !bIsCrouched;
+}
+
+void APlayerCharacter::DoCrouch()
+{
+	bWantsToCrouch = true;
+}
+
+void APlayerCharacter::EndCrouch()
+{
+	bWantsToCrouch = false;
+}
+
+bool APlayerCharacter::IsSprinting() const
+{
+#ifdef RON_NO_SPRINT
+	return false;
+#else
+	if (bIsCollectingEvidence)
+		return false;
+
+	if (!bWalking && IsStunned())
+	{
+		//Walk();
+		return false;
+	}
+
+	if (!IsHoldingSprint() && IsLocalPlayer())
+	{
+		return false;
+	}
+
+	if (!bWalking && GetVelocity().Size2D() > 280.0f)
+	{
+		// sprint vector offset calculated in tick so it's only done max 1x per frame
+		return SprintVectorOffset > 0.3f;
+	}
+
+	return false;
+#endif
+}
+
+void APlayerCharacter::PlayArrayOfMovementSounds(TArray<FMovementSound> SoundArray)
+{
+	for (int32 i = 0; i < SoundArray.Num(); i++)
+	{
+		const FMovementSound Sound = SoundArray[i];
+		const float Chance = FMath::RandRange(0, 100);
+		if (Sound.ChanceToPlay > Chance)
+		{
+			USoundData::SpawnSoundAttached(Sound.Sound, GetMesh(), IsLocalPlayer() ? false : true);
+		}
+	}
+}
+
+void APlayerCharacter::PlayRandomSound(TArray<USoundCue*> SoundArray, FVector Location)
+{
+	if (SoundArray.Num() > 0)
+	{
+		UGameplayStatics::PlaySoundAtLocation(GetWorld(), SoundArray[FMath::RandRange(0, SoundArray.Num() - 1)], Location);
+	}
+}
+
+void APlayerCharacter::Play1PMontage(UAnimMontage* NewMontage, float PlayRate)
+{
+	Client_Play1PMontage(NewMontage, PlayRate);
+}
+
+void APlayerCharacter::Play1PMontageDeferred_Implementation(UAnimMontage* Montage, const FString& AnimationName)
+{
+	PlayedTableMontageMap1P.Add(AnimationName, Montage);
+	Play1PMontage(Montage);
+}
+
+void APlayerCharacter::Play1PMontage_NonClient(UAnimMontage* NewMontage, float PlayRate)
+{
+	Client_Play1PMontage_Implementation(NewMontage, PlayRate);
+}
+
+bool APlayerCharacter::IsTableMontagePlaying(const FString& Animation) const
+{
+	if (PlayedTableMontageMap1P.Find(Animation))
+	{
+		if (LastMontageTableStreamableHandle.IsValid() && LastMontageTableStreamableHandle->IsLoadingInProgress())
+			return true;
+	
+		return Super::IsTableMontagePlaying(Animation) || (GetMesh1P() && GetMesh1P()->GetAnimInstance() && PlayedTableMontageMap1P[Animation] == GetMesh1P()->GetAnimInstance()->GetCurrentActiveMontage());
+	} else
+	{
+		return Super::IsTableMontagePlaying(Animation);
+	}
+}
+
+bool APlayerCharacter::IsTableMontagePlayingWithTimeRemaining(const FString& Animation, float& TimeRemaining) const
+{
+	if (PlayedTableMontageMap1P.Find(Animation))
+	{
+		if (LastMontageTableStreamableHandle.IsValid() && LastMontageTableStreamableHandle->IsLoadingInProgress())
+    		return true;
+    		
+		if (GetMesh1P() && GetMesh1P()->GetAnimInstance() && PlayedTableMontageMap1P[Animation] == GetMesh1P()->GetAnimInstance()->GetCurrentActiveMontage())
+		{
+			TimeRemaining = GetMesh1P()->GetAnimInstance()->GetCurrentActiveMontage()->GetPlayLength() - GetMesh1P()->GetAnimInstance()->Montage_GetPosition(GetMesh1P()->GetAnimInstance()->GetCurrentActiveMontage());
+			return true;
+		}
+	}
+
+	return Super::IsTableMontagePlayingWithTimeRemaining(Animation, TimeRemaining);
+}
+
+void APlayerCharacter::StopFPAnimMontage(class UAnimMontage* AnimMontage, float BlendoutTime)
+{
+	UAnimInstance* AnimInstance = (GetMesh1P()) ? GetMesh1P()->GetAnimInstance() : nullptr;
+	UAnimMontage* MontageToStop = (AnimMontage) ? AnimMontage : GetCurrentFPMontage();
+	const bool bShouldStopMontage = AnimInstance && MontageToStop && !AnimInstance->Montage_GetIsStopped(MontageToStop);
+
+	if (bShouldStopMontage)
+	{
+		AnimInstance->Montage_Stop(BlendoutTime > 0.0f ? BlendoutTime : MontageToStop->BlendOut.GetBlendTime(), MontageToStop);
+	}
+}
+
+void APlayerCharacter::StopFPMontageFromTable(const FString& Animation, float BlendoutTime)
+{
+	if (IsTableMontagePlaying(Animation) && PlayedTableMontageMap1P.Find(Animation))
+	{
+		StopFPAnimMontage(PlayedTableMontageMap1P[Animation], BlendoutTime);
+	}
+}
+
+void APlayerCharacter::Client_Play1PMontage_Implementation(UAnimMontage* NewMontage, const float PlayRate)
+{
+	if (!NewMontage)
+		return;
+	
+	if (!GetMesh1P())
+		return;
+
+	if (!GetMesh1P()->GetAnimInstance())
+		return;
+
+	GetMesh1P()->GetAnimInstance()->Montage_Play(NewMontage, PlayRate);
+}
+
+void APlayerCharacter::PlayLocal1PMontage(UAnimMontage* NewMontage, float PlayRate)
+{
+	//Client_Play1PMontage(NewMontage, PlayRate);
+	Client_Play1PMontage_Implementation(NewMontage, PlayRate);
+}
+
+void APlayerCharacter::Multicast_Stop1PMontage_Implementation(UAnimMontage* Montage, float BlendoutTime)
+{
+	if (GetMesh1P()->GetAnimInstance())
+	{
+		GetMesh1P()->GetAnimInstance()->Montage_Stop(BlendoutTime, Montage);
+	}
+}
+
+void APlayerCharacter::Multicast_ToggleLaserLight_Implementation()
+{
+	ABaseWeapon* bw = Cast<ABaseWeapon>(GetEquippedItem());
+	if (bw)
+	{
+		if (bw->GetLaserAttachment())
+		{
+			bw->GetLaserAttachment()->ToggleLaser(!bw->GetLaserAttachment()->IsLaserOn());
+			//bw->GetLaserAttachment()->bRepOn = bw->GetLaserAttachment()->IsLaserOn();
+		}
+		else if (bw->GetLightAttachment())
+		{
+			bw->GetLightAttachment()->ToggleLight(!bw->GetLightAttachment()->IsLightOn());
+		}
+	}
+	else
+	{
+		ABallisticsShield* shield = Cast<ABallisticsShield>(GetEquippedItem());
+		if (shield && shield->PistolEquippedWithShield)
+		{
+			if (shield->PistolEquippedWithShield->GetLaserAttachment())
+			{
+				shield->PistolEquippedWithShield->GetLaserAttachment()->ToggleLaser(!shield->PistolEquippedWithShield->GetLaserAttachment()->IsLaserOn());
+			}
+			else if (shield->PistolEquippedWithShield->GetLightAttachment())
+			{
+				shield->PistolEquippedWithShield->GetLightAttachment()->ToggleLight(!shield->PistolEquippedWithShield->GetLightAttachment()->IsLightOn());
+			}
+		}
+	}
+}
+
+void APlayerCharacter::Client_PlayPostProcessEffect_Implementation(const FName& InPostProcessEffect, AActor* DamageCauser)
+{
+	PlayerPostProcessingComp->PlayPostProcessEffect_Name(InPostProcessEffect, DamageCauser);
+}
+
+void APlayerCharacter::PlayArmourRelatedEffects(ABaseArmour* Armour, const FHitResult& Hit)
+{
+	if (!Armour)
+		return;
+
+	// Grab the current local (server) armour hit particle since its set by the SWAT armour in HandleDamage
+	FTransform Transform(Hit.ImpactNormal.Rotation() + FRotator(-90, 0, 0), Hit.ImpactPoint);
+	Multicast_PlayArmourRelatedEffects(Armour, Armour->ArmourHitParticle, Transform);
+}
+
+void APlayerCharacter::Multicast_PlayArmourRelatedEffects_Implementation(ABaseArmour* Armour, UParticleSystem* Particle, const FTransform& AtTransform)
+{
+	if (!Armour)
+		return;
+	
+	UGameplayStatics::SpawnEmitterAtLocation(GetWorld(), Particle, AtTransform);
+
+	// Only play the third person sound on other clients
+	if (!IsLocalPlayer())
+	{
+		UFMODBlueprintStatics::PlayEventAtLocation(GetWorld(), Armour->ArmourHitSound, AtTransform, true);
+	}
+
+	if (IsLocalPlayer() && GetRONPlayerController())
+	{
+		GetRONPlayerController()->ClientStartCameraShake(Camera_Hit_Head_Front);
+	}
+}
+
+void APlayerCharacter::OnRep_UpdateAnimInstance()
+{
+	if (Replicated_1PAnimInstance)
+	{
+		UAnimMontage* PlayingMontage = nullptr;
+		if (GetMesh1P()->GetAnimInstance())
+			PlayingMontage = GetMesh1P()->GetAnimInstance()->GetCurrentActiveMontage();
+
+		GetMesh1P()->SetAnimInstanceClass(Replicated_1PAnimInstance);
+		GetMesh1P()->InitializeAnimScriptInstance(false);
+		GetMesh1P()->GetAnimInstance()->Montage_Play(PlayingMontage);
+	}
+	if (Replicated_3PAnimInstance)
+	{
+		UAnimMontage* PlayingMontage = nullptr;
+		if (GetMesh()->GetAnimInstance())
+			PlayingMontage = GetMesh()->GetAnimInstance()->GetCurrentActiveMontage();
+
+		GetMesh()->SetAnimInstanceClass(Replicated_3PAnimInstance);
+		GetMesh()->InitializeAnimScriptInstance(false);
+		GetMesh()->GetAnimInstance()->Montage_Play(PlayingMontage);
+	}
+}
+
+void APlayerCharacter::OnRep_MeshReplicated()
+{
+	Super::OnRep_MeshReplicated();
+
+	if (CharacterLookOverride.FPMeshOverride)
+		Rep_FPMesh = CharacterLookOverride.FPMeshOverride;
+
+ 	if (CharacterLookOverride.FPBodyMeshOverride)
+		Rep_FPBodyMesh = CharacterLookOverride.FPBodyMeshOverride;
+	
+	if (Rep_FPMesh)
+	{
+		GetMesh1P()->SetSkeletalMesh(Rep_FPMesh, !GetMesh1P()->SkeletalMesh);
+		GetMesh1P()->EmptyOverrideMaterials();
+		
+		LastSetMesh1PDynamicMaterial = nullptr;
+	}
+
+	if (Rep_FPBodyMesh)
+	{
+		GetMeshBody1P()->SetSkeletalMesh(Rep_FPBodyMesh, !GetMeshBody1P()->SkeletalMesh);
+		GetMeshBody1P()->EmptyOverrideMaterials();
+	}
+}
+
+void APlayerCharacter::StartStun(EStunType Stun, AActor* StunCauser)
+{
+	ABallisticsShield* BallisticShield = Cast<ABallisticsShield>(GetEquippedItem());
+	if (Stun != EStunType::ST_Gassed && BallisticShield)
+		return;
+
+	#if !UE_BUILD_SHIPPING
+	if (bGodMode)
+		return;
+	#endif
+	
+	// Play post process locally
+	Client_StartStun(Stun, StunCauser, StunCauser ? StunCauser->GetActorLocation() : FVector::ZeroVector);
+	Super::StartStun(Stun, StunCauser);
+}
+
+void APlayerCharacter::Client_StartStun_Implementation(EStunType StunType, AActor* StunCauser, FVector DamageCauserLocation)
+{
+	#if !UE_BUILD_SHIPPING
+	if (bGodMode)
+		return;
+	#endif
+
+	// Hack to resolve issues where the stun causer was spawned and hasn't replicated before this function was called
+	if (!StunCauser)
+	{
+		AActor* Actor = GetWorld()->SpawnActor<AActor>();
+		Actor->SetActorLocation(DamageCauserLocation);
+		Actor->SetLifeSpan(5.0f);
+		StunCauser = Actor;
+	}
+	
+	switch (StunType)
+	{
+		case EStunType::ST_None:			break;
+		case EStunType::ST_Tased:			PlayerPostProcessingComp->PlayPostProcessEffect_Name("Taser", StunCauser); break;
+		case EStunType::ST_Gassed:			PlayerPostProcessingComp->PlayPostProcessEffect_Name("Gas", StunCauser); break;
+		case EStunType::ST_Flash:			PlayerPostProcessingComp->PlayPostProcessEffect_Name("Flashbang", StunCauser); break;
+		case EStunType::ST_Stung:			PlayerPostProcessingComp->PlayPostProcessEffect_Name("Stinger", StunCauser); break;
+		case EStunType::ST_Beanbag:			PlayerPostProcessingComp->PlayPostProcessEffect_Name("Stinger", StunCauser); break;
+		case EStunType::ST_Pepperball:		PlayerPostProcessingComp->PlayPostProcessEffect_Name("Stinger", StunCauser); break;
+		case EStunType::ST_Rubberball:		PlayerPostProcessingComp->PlayPostProcessEffect_Name("Stinger", StunCauser); break;
+		default: break;
+	}
+}
+
+void APlayerCharacter::StartPepperSprayed(APepperspray* Pepperspray)
+{
+#if !UE_BUILD_SHIPPING
+	if (bGodMode)
+		return;
+#endif
+	
+	// Play post process locally
+	Client_StartPepperSprayed(Pepperspray, Pepperspray->GetActorLocation());
+	Super::StartPepperSprayed(Pepperspray);
+}
+
+void APlayerCharacter::Client_StartPepperSprayed_Implementation(APepperspray* Pepperspray, FVector DamageCauserLocation)
+{
+#if !UE_BUILD_SHIPPING
+	if (bGodMode)
+		return;
+#endif
+
+	// Hack to resolve issues where the stun causer was spawned and hasn't replicated before this function was called
+	if (!Pepperspray)
+	{
+		Pepperspray = GetWorld()->SpawnActor<APepperspray>();
+		Pepperspray->SetActorLocation(DamageCauserLocation);
+		Pepperspray->SetLifeSpan(5.0f);
+	}
+
+	PlayerPostProcessingComp->PlayPostProcessEffect_Name("Pepperspray", Pepperspray);
+}
+
+void APlayerCharacter::StartBoneBlend(FName BoneName)
+{
+	GetMesh()->SetAllBodiesBelowSimulatePhysics(BlendedBone, false);
+	GetMesh()->SetAllBodiesBelowSimulatePhysics(BoneName, true);
+	bBlendingIn = true;
+	BlendedBone = BoneName;
+}
+
+void APlayerCharacter::OnRep_StartBoneBlend()
+{
+	StartBoneBlend(BlendedBone);
+}
+
+void APlayerCharacter::Respawn()
+{
+	APlayerController* pc = Cast<APlayerController>(GetController());
+	if (pc)
+	{
+		pc->ClientSetCameraFade(false);
+		if (GetWorld()->GetAuthGameMode())
+		{
+			GetWorld()->GetAuthGameMode()->RestartPlayer(GetController());
+		}
+	}
+}
+
+void APlayerCharacter::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
+{
+	if (!IsDeadOrUnconscious())
+	{
+		// we don't have a 1p mesh so we obviously can't do anything here??
+		//if (!GetMesh1P())
+		//	return;
+
+		if (!bAiming)
+		{
+			LastNonADSRunSpeedPercent = CurrentRunSpeedPercent;
+		}
+
+		if (bFindCameraComponentWhenViewTarget && FirstPersonCameraComponent && FirstPersonCameraComponent->IsActive())
+		{
+			float Vel = GetVelocity().Size();
+			float VelNormalized = UKismetMathLibrary::NormalizeToRange(Vel, 90.0f, 450.0f);
+			VelNormalized = FMath::Clamp(VelNormalized, 0.0f, 1.0f);
+			
+			FirstPersonCameraComponent->GetCameraView(DeltaTime, OutResult);
+			MeshspaceInterp = 8.0f;
+			// Alex: latest changes parent the camera to a socket, therefore edits to camera and mesh have to be done differently
+			// First Part: related to stance and lean, applied to whole mesh therefore also influences the camera
+			FVector TempPostureLeanChange = FVector::ZeroVector;
+			//const FVector Velocity = GetActorRotation().UnrotateVector(GetVelocity());
+
+			TempPostureLeanChange.X = -(QuickLeanAmount + FreeLeanX);
+
+			float LeanHeightChanges = (-FMath::Abs(QuickLeanAmount * 0.5) + FreeLeanZ);
+			if (LeanHeightChanges >= 0.0f)
+				// ##UE5UPGRADE## Compatibility
+				TempPostureLeanChange.Z += LeanHeightChanges * FMath::GetMappedRangeValueClamped(FVector2D(0.0f, 40.0f ), FVector2D(1.0f, 0.1f), FMath::Abs(FreeLeanX));
+			else
+				TempPostureLeanChange.Z += LeanHeightChanges;
+
+			// only quick lean should be added for now
+			//TempPostureLeanChange.X = -(QuickLeanAmount);
+			//TempPostureLeanChange.Z += -FMath::Abs(QuickLeanAmount * 0.5);
+
+			// to make crouch feel better
+			//float CrouchExtra = 25.0f;
+
+			// for crouch we only subtract the amount because camera bone already places it at correct height from DCC
+			// if (IsCrouching()) // dont use it if we use pelvic movement!
+			// {
+			// 	if (GetVelocity().Size2D() < 50.0f)
+			// 		TempPostureLeanChange.Z += ((0.0f) + 40);
+			// 	else
+			// 		TempPostureLeanChange.Z += (20.0f);
+			// }
+
+			MeshPostureLeanOffset = FMath::VInterpTo(MeshPostureLeanOffset, TempPostureLeanChange, DeltaTime, MeshspaceInterp);
+
+			// Second Part: modifications done on weapon level such as adjusting poses for aiming down the sights, not applied to camera
+
+			// WEAPON MODIFCATIONS NEXT
+			FVector TempWeaponOffsetChange = FVector::ZeroVector;
+			FRotator TempWeaponRotationChange = FRotator(0, 0, 0);
+
+			FVector Default_WeaponAppliedOffset = FVector::ZeroVector;
+			FVector Aim_WeaponAppliedOffset = FVector::ZeroVector;
+			FVector Down_WeaponAppliedOffset = FVector::ZeroVector;
+
+			// rotation addition
+			FRotator Default_WeaponAppliedRotation = FRotator(0, 0, 0);
+			FRotator Aim_WeaponAppliedRotation = FRotator(0, 0, 0);
+			//FRotator Down_WeaponAppliedRotation = FRotator(0, 0, 0);
+
+			if (GetEquippedItem())
+			{
+				FTransform AimingMeshspaceTransform;
+				FTransform DefaultMeshspaceTransform;
+				FTransform BackMeshspaceTransform;
+				float PushbackRange;
+
+				GetEquippedItem()->GetMeshspaceTransform(DefaultMeshspaceTransform, AimingMeshspaceTransform, BackMeshspaceTransform);
+
+				Default_WeaponAppliedOffset = DefaultMeshspaceTransform.GetLocation() + FVector(0.0f, 0.0f, -.0f);
+				Aim_WeaponAppliedOffset = AimingMeshspaceTransform.GetLocation() - FVector(UReadyOrNotFunctionLibrary::GetWeaponFOVOffset(), 0.0f, 0.0f);
+				Aim_WeaponAppliedOffset.X = FMath::Max(Aim_WeaponAppliedOffset.X, 2.0f);
+				Default_WeaponAppliedRotation = DefaultMeshspaceTransform.GetRotation().Rotator();
+				Aim_WeaponAppliedRotation = AimingMeshspaceTransform.GetRotation().Rotator(); 
+			
+				 
+				if (GetRONPlayerController())
+				{
+					float DeltaX, DeltaY;
+					FRotator DeltaRot = UKismetMathLibrary::NormalizedDeltaRotator(GetRONPlayerController()->GetControlRotation(), LastFrameControlRotation);
+					DeltaX = DeltaRot.Yaw / DeltaTime * 0.022f;
+					DeltaY = DeltaRot.Pitch  / DeltaTime * 0.022f;
+					LastFrameControlRotation = GetRONPlayerController()->GetControlRotation();
+					InertiaDragAimRotation = FRotator(0.0f, -DeltaX, DeltaY) * GetEquippedItem()->InertiaDragAimRotation  ;
+					InertiaDragAimLocation = FVector(0.0f, -DeltaX, DeltaY) * GetEquippedItem()->InertiaDragAimLocation;
+					InertiaDragStrafeRotation = FMath::RInterpTo(InertiaDragStrafeRotation, FRotator(0.0f, (MoveRightInput * -20.0f * VelNormalized * GetEquippedItem()->InertiaDragStrafeRotation) , 0.0f), DeltaTime, 3.0f);
+					InertiaDragStrafeLocation = FMath::VInterpTo(InertiaDragStrafeLocation, FVector(0.0f, (MoveRightInput * -20.0f * VelNormalized * GetEquippedItem()->InertiaDragStrafeLocation) , 0.0f), DeltaTime, 3.0f);
+					Default_WeaponAppliedRotation += InertiaDragAimRotation;
+					Default_WeaponAppliedRotation += InertiaDragStrafeRotation;
+					Default_WeaponAppliedOffset += FVector(0.0f, (InertiaDragAimLocation.Y + InertiaDragStrafeLocation.Y), (-InertiaDragAimLocation.Z * 0.75f));
+					Aim_WeaponAppliedRotation += InertiaDragAimRotation;
+					Aim_WeaponAppliedRotation += InertiaDragStrafeRotation;
+					Aim_WeaponAppliedOffset += FVector(0.0f, (InertiaDragAimLocation.Y + InertiaDragStrafeLocation.Y), (-InertiaDragAimLocation.Z * 0.75f));
+				}
+
+
+				PushbackRange = GetEquippedItem()->GetLowReadyRange() + 30.0f;
+				if (LowReadyDistance < PushbackRange)
+				{
+					float BackRatio = (PushbackRange - LowReadyDistance) / PushbackRange;
+
+					Down_WeaponAppliedOffset = BackMeshspaceTransform.GetLocation() * BackRatio * 4.0f;
+					//Down_WeaponAppliedRotation = BackMeshspaceTransform.GetRotation().Rotator() * BackRatio;
+				}
+			}
+ 
+			if (GetEquippedItem() && !GetEquippedItem()->bDisableMeshspaceMovement)
+			{
+				float AdsMultiplier = 1.0f;
+				FVector NewMesh1POffset = bIsCrouched ? FVector(0.0f, 0.0f, 2.0f) : FVector::ZeroVector;
+				NewMesh1POffset.Y += -(QuickLeanAmount + FreeLeanX) / 10 + (FMath::Abs(GetVelocity().Size()) / 200.0f) /*+ (Camera_RotationRate.Yaw * CameraRotationRateMeshSpaceMultiplier.Y)*/ + FMath::Clamp(((PendingRecoil.Yaw) * MeshspaceRecoilMovementMultiplier.Y), -MeshspaceRecoilMovementMinMax.Y, MeshspaceRecoilMovementMinMax.Y);
+				NewMesh1POffset.Z += (FreeLeanZ / 20) + (GetVelocity().Z / 150.0f) + FMath::Clamp(((PendingRecoil.Pitch) * MeshspaceRecoilMovementMultiplier.Z), -MeshspaceRecoilMovementMinMax.Z, MeshspaceRecoilMovementMinMax.Z);
+				NewMesh1POffset.X += FMath::Abs(GetVelocity().Size()) * -0.02f - FMath::Clamp(((PendingRecoil.Yaw + PendingRecoil.Pitch) * MeshspaceRecoilMovementMultiplier.X), -MeshspaceRecoilMovementMinMax.X, MeshspaceRecoilMovementMinMax.X) /*+ (GetControlRotation().GetNormalized().Pitch / 15) + (Camera_RotationRate.Yaw * CameraRotationRateMeshSpaceMultiplier.X)*/;
+
+				FVector MovementSpeedScale;
+				FRotator MovementSpeedScalePitchYawRoll;
+				GetEquippedItem()->GetMovementSpeedScale(MovementSpeedScale, MovementSpeedScalePitchYawRoll);
+
+				bool bHasBlockingAnimPlaying = false;
+				if (GetEquippedItem() && GetEquippedItem()->IsBlockingAnimationPlaying({EBlockingAnimationExclusion::BAE_Draw, EBlockingAnimationExclusion::BAE_FireSelect}))
+				{
+					bHasBlockingAnimPlaying = true;
+				}
+				if (!bHasBlockingAnimPlaying && !bAiming)
+				{
+					NewMesh1POffset.X -= (1.0f - CurrentRunSpeedPercent) * MovementSpeedScale.X;
+					NewMesh1POffset.Y -= (1.0f - CurrentRunSpeedPercent) * MovementSpeedScale.Y;
+					NewMesh1POffset.Z -= (1.0f - CurrentRunSpeedPercent) * MovementSpeedScale.Z;
+				}
+				
+				
+
+				NewMesh1POffset = NewMesh1POffset * MeshSpaceMovementMultiplier1P;
+				NewMesh1POffset += Default_WeaponAppliedOffset;
+				NewMesh1POffset += Down_WeaponAppliedOffset;
+				FVector ADSMesh1POffset = FVector::ZeroVector;
+				ADSMesh1POffset.Y = PendingRecoil.Yaw;
+				ADSMesh1POffset.X = -FMath::Clamp(((PendingRecoil.Yaw + PendingRecoil.Pitch) * 2.5f), 0.0f, 2.5f) /*+ (GetControlRotation().GetNormalized().Pitch / 30)*/;
+				ADSMesh1POffset.Z = GetVelocity().Z * 0.005f;
+				ADSMesh1POffset += Aim_WeaponAppliedOffset;
+				ADSMesh1POffset += Down_WeaponAppliedOffset;
+				ADSMesh1POffset.X -= (1.0f - LastNonADSRunSpeedPercent) * 5.0f;
+
+				// allow the user to still look at the screen while using the optiwand even if we've pushed it back
+				//AOptiwand* optiwand = Cast<AOptiwand>(GetEquippedItem());
+				//if (optiwand && optiwand->bMirorring)
+				//{
+				//	bLookingAtOptiwand = true;
+				//	bEndingFreelookPitch = false;
+				//	bEndingFreelookYaw = false;
+				//	FreeLookCache.Pitch = FMath::FInterpTo(FreeLookCache.Pitch, Down_WeaponAppliedOffset.X * -1.5f, DeltaTime, 5.0f);
+				//	FreeLookCache.Yaw = FMath::FInterpTo(FreeLookCache.Yaw, Down_WeaponAppliedOffset.X * -2.6f, DeltaTime, 5.0f);
+				//}
+				//else if (bLookingAtOptiwand && !bFreelooking)
+				//{
+				//	FreeLookCache.Pitch = FMath::FInterpTo(FreeLookCache.Pitch, 0.0f, DeltaTime, 5.0f);
+				//	FreeLookCache.Yaw = FMath::FInterpTo(FreeLookCache.Yaw, 0.0f, DeltaTime, 5.0f);
+				//	if (FreeLookCache.Pitch == 0.0f && FreeLookCache.Yaw == 0.0f)
+				//	{
+				//		bLookingAtOptiwand = false;
+				//	}
+				//}
+
+				if (!bIsSightTweakMode)
+				{
+					if (bAiming)
+					{
+						ABaseMagazineWeapon* MagWeapon = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+						if (MagWeapon)
+						{
+							if (bCantedSightEnabled)
+							{
+								TempWeaponOffsetChange = FVector(5.0f, -5.0f, -2.0f);
+								TempWeaponRotationChange = FRotator(-30.0f, 0.0f, 0.0f);
+							} else
+							{
+								if (MagWeapon->GetScopedAttachment())
+								{
+									// see if we need use the secondary meshspace from a flippable sight as example
+									if (bIsSecondarySightActive && MagWeapon->GetScopedAttachment()->bIsSecondarySightActive)
+									{
+										//bool bScopeModFound = false;
+										for (int32 i = 0; i < MagWeapon->GetScopedAttachment()->ScopeMods.Num(); i++)
+										{
+											if (MagWeapon->GetScopedAttachment()->GetScopeMods(MagWeapon) == MagWeapon->GetScopedAttachment()->ScopeMods[i])
+											{
+												//bScopeModFound = true;
+												TempWeaponOffsetChange = FVector(-MagWeapon->GetScopedAttachment()->ScopeMods[i].MeshSpace_ADS_SecondaryPos.Y, MagWeapon->GetScopedAttachment()->ScopeMods[i].MeshSpace_ADS_SecondaryPos.X, MagWeapon->GetScopedAttachment()->ScopeMods[i].MeshSpace_ADS_SecondaryPos.Z);
+												TempWeaponRotationChange = MagWeapon->GetScopedAttachment()->ScopeMods[i].MeshSpace_ADS_SecondaryRot;
+											}
+										}
+									}
+									else
+									{
+										TempWeaponOffsetChange = FVector(-ADSMesh1POffset.Y, ADSMesh1POffset.X, ADSMesh1POffset.Z);
+										TempWeaponRotationChange = Aim_WeaponAppliedRotation;
+									}
+								}
+								else
+								{
+									TempWeaponOffsetChange = FVector(-ADSMesh1POffset.Y, ADSMesh1POffset.X, ADSMesh1POffset.Z);
+									TempWeaponRotationChange = Aim_WeaponAppliedRotation;
+								}
+							}
+							
+						}
+						else
+						{
+							TempWeaponOffsetChange = FVector(-ADSMesh1POffset.Y, ADSMesh1POffset.X, ADSMesh1POffset.Z);
+							TempWeaponRotationChange = Aim_WeaponAppliedRotation;
+						}
+					}
+					else
+					{
+						TempWeaponOffsetChange = FVector(-NewMesh1POffset.Y, NewMesh1POffset.X, NewMesh1POffset.Z);
+						TempWeaponRotationChange = Default_WeaponAppliedRotation;
+					}
+				}
+				else
+				{
+					ABaseMagazineWeapon* MagWeapon = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+					if (MagWeapon)
+					{
+						FVector LineStart = MagWeapon->GetBulletSpawn()->GetComponentLocation();
+						FVector LineEnd = LineStart + MagWeapon->GetBulletSpawn()->GetComponentRotation().RotateVector((LineStart.ForwardVector * 1000.0f));
+						DrawDebugLine(GetWorld(), LineStart, LineEnd, FColor::Green, false, -1.0f, 0.0f, 0.15f);
+					}
+
+					TempWeaponOffsetChange = FVector(-SightTweakerPosOffset.Y, SightTweakerPosOffset.X, SightTweakerPosOffset.Z);
+					TempWeaponRotationChange = SightTweakerRotOffset;
+				}
+				
+				// free aim concept
+				// clamp angles
+				// SOFT DEADZONE CLAMP AT FREE AIM LIMIT
+
+				if (!bFreelooking)
+				{
+					float freeAimLimit = GetEquippedItem()->GetFreeAimLimit();
+
+					// use special value only for ADS free limit
+					if (bAiming)
+					{
+						freeAimLimit = GetEquippedItem()->GetFreeAimLimitADS();
+
+						// blend it out because it does not work good with the actual lean offset for now
+						if ((FreeLeanX + QuickLeanAmount) != 0.0f)
+						{
+							freeAimLimit *= 0.0f;
+						}
+					}
+
+
+					if (FreeAimCache.Pitch < -freeAimLimit)
+					{
+						FreeAimCache.Pitch = FMath::FInterpTo(FreeAimCache.Pitch, -freeAimLimit, DeltaTime, 20.0f);
+					}
+
+					if (FreeAimCache.Pitch > freeAimLimit)
+					{
+						FreeAimCache.Pitch = FMath::FInterpTo(FreeAimCache.Pitch, freeAimLimit, DeltaTime, 20.0f);
+					}
+
+					if (FreeAimCache.Yaw < -freeAimLimit)
+					{
+						FreeAimCache.Yaw = FMath::FInterpTo(FreeAimCache.Yaw, -freeAimLimit, DeltaTime, 20.0f);
+					}
+
+					if (FreeAimCache.Yaw > freeAimLimit)
+					{
+						FreeAimCache.Yaw = FMath::FInterpTo(FreeAimCache.Yaw, freeAimLimit, DeltaTime, 20.0f);
+					}
+
+					FreeAimCache.Normalize();
+				}
+
+				GEngine->AddOnScreenDebugMessage(88897, 1.0f, FColor::White, "Velocity: " + FString::SanitizeFloat(VelNormalized));
+
+				AdsMultiplier = 0.8f;
+
+				ABaseMagazineWeapon* MagWeapon = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+				if (MagWeapon)
+				{
+					if (MagWeapon->GetScopedAttachment())
+					{
+						AdsMultiplier *= MagWeapon->GetScopedAttachment()->ADS_Speed_Multiplier;
+					}
+
+					if (MagWeapon->GetLaserAttachment())
+					{
+						AdsMultiplier *= MagWeapon->GetLaserAttachment()->ADS_Speed_Multiplier;
+					}
+
+					if (MagWeapon->GetLightAttachment())
+					{
+						AdsMultiplier *= MagWeapon->GetLightAttachment()->ADS_Speed_Multiplier;
+					}
+				}
+
+				// push back to offsets
+				// TODO: free aim pitch is not working yet because we apply the pitch control over the anim graph.
+
+				if (!bOverrideMeshWeaponTransform)
+				{
+					TempWeaponOffsetChange = FVector(FMath::Clamp(TempWeaponOffsetChange.X, -10.0f, 10.0f), FMath::Clamp(TempWeaponOffsetChange.Y, 2.0f, 10.0f),FMath::Clamp(TempWeaponOffsetChange.Z, -10.0f, 10.0f));
+					MeshWeaponOffset = FMath::VInterpTo(MeshWeaponOffset, TempWeaponOffsetChange, DeltaTime, MeshspaceInterp * AdsMultiplier);
+
+					TempWeaponRotationChange = FRotator( FMath::Clamp(TempWeaponRotationChange.Pitch, -30.0f, 30.0f), FMath::Clamp(TempWeaponRotationChange.Yaw, -30.0f, 30.0f),FMath::Clamp(TempWeaponRotationChange.Roll, -30.0f, 30.0f));
+					MeshWeaponRotation = FMath::RInterpTo(MeshWeaponRotation, TempWeaponRotationChange, DeltaTime, MeshspaceInterp * AdsMultiplier);
+				}
+
+				// get the factors that influence free aim for gun
+				float FreeAimInterp = GetEquippedItem()->FreeAimInterpSpeed;
+				float FreeAimADSMod = GetEquippedItem()->FreeAimInterpADSModifier;
+				float FreeAimHipMod = GetEquippedItem()->FreeAimInterpHipModifier;
+				float FreeAimSlowMoveMod = GetEquippedItem()->FreeAimSlowMoveModifier;
+				float FreeAimSpeedTolerance = GetEquippedItem()->FreeAimSlowMoveTolerance;
+				
+				// clamp velocity to max tolerance value to not get values over 1.0
+				float FreeAimSpeedFactor = FMath::Clamp(GetVelocity().Size2D(), 0.0f, FreeAimSpeedTolerance) / FreeAimSpeedTolerance;
+				// ##UE5UPGRADE## Compatibility
+				float FreeAimMoveScaler = FMath::GetMappedRangeValueClamped(FVector2D(0.0f, 1.0f), FVector2D(FreeAimSlowMoveMod, 1.0f), FreeAimSpeedFactor);
+				float FreeAimFinalInterp = FreeAimInterp * (bAiming ? FreeAimADSMod : FreeAimHipMod);
+				//UE_LOG(LogTemp, Warning, TEXT("FACTOR IS %f SCALER IS: %f") , FreeAimSpeedFactor, FreeAimMoveScaler);
+
+				// moved the mesh free aim to this to correctly apply with pivot custom node so sights line up
+				MeshWeaponFreeAimRotation = FMath::RInterpTo(MeshWeaponFreeAimRotation, FRotator(0, FreeAimCache.Yaw * FreeAimMoveScaler, FreeAimCache.Pitch * FreeAimMoveScaler), DeltaTime, FreeAimFinalInterp);
+
+
+				// empty freeaimcache when not moving
+				// todo: may want to bind this to a timer to make it less abrupt?
+				if (GetVelocity().Size2D() == 0.0f && !bFreelooking)
+				{
+					FreeAimCache.Yaw = 0.0f;
+					FreeAimCache.Pitch = 0.0f;
+				}
+					
+
+				// addition for proc leaning that moves the weapon while keeping sights aligned
+				// for this we rotate the vector around the camera pivot so the sights will always match up
+				FVector TempWeaponLeanLoc = FVector::ZeroVector;
+				FRotator TempWepLeanRot = FRotator::ZeroRotator;
+
+				// get the fp gun mesh
+				if (GetEquippedItem())
+				{
+					//FTransform SpineTrans = Mesh1P->GetSocketTransform("spine_3_socket", ERelativeTransformSpace::RTS_Component);
+					//FTransform GunTrans = Mesh1P->GetSocketTransform("RightWeaponSocket", ERelativeTransformSpace::RTS_Component);
+					//FTransform SightTrans = GetEquippedItem()->ItemMesh->GetSocketTransform("sight_lean_socket", ERelativeTransformSpace::RTS_Component);
+
+					//FVector FinalSocketPos = SightTrans.GetLocation() + GunTrans.GetLocation();
+
+					//UE_LOG(LogTemp, Warning, TEXT("gun pos is: %f %f %f"), GunTrans.GetLocation().X, GunTrans.GetLocation().Y, GunTrans.GetLocation().Z);
+					//UE_LOG(LogTemp, Warning, TEXT("socket pos is: %f %f %f"), FinalSocketPos.X, FinalSocketPos.Y, FinalSocketPos.Z);
+
+
+					// get weapon attachment socket!
+					// figure out where our shifted pivot is at, we start looking at the actual rotation pivot point and figure out the offset to shift to
+					// in this case we shift from spine_3 to the sight rotation socket
+					//FVector PivotTransOffset = (SightTrans.GetLocation() + GunTrans.GetLocation()) - SpineTrans.GetLocation();
+					//DrawDebugSphere(GetWorld(), SpineTrans.GetLocation(), 16, 8, FColor::Blue, false, 0.0f, 0.05f, 1.0f);
+					//DrawDebugSphere(GetWorld(), FinalSocketPos, 16, 8, FColor::Red, false, 0.0f, 0.05f, 1.0f);
+					//DrawDebugSphere(GetWorld(), PivotTransOffset, 12, 8, FColor::Purple, false, 0.0f, 0.05f, 1.0f);
+
+					//FVector UnitDir = UKismetMathLibrary::GetDirectionUnitVector(SpineTrans.GetLocation(), FinalSocketPos);
+					//FVector UnitDir = FinalSocketPos - SpineTrans.GetLocation();
+
+					// make lean more responsive so it has no delay on the weapon
+					float WeaponLeanRotMax = 25.0f;
+					float ClampedLeanRot = FMath::Clamp(QuickLeanAmount + FreeLeanX, -WeaponLeanRotMax, WeaponLeanRotMax);
+					TempWepLeanRot = FRotator(ClampedLeanRot, 0.0f, 0.0f);
+					TempWeaponLeanLoc = TempWepLeanRot.RotateVector(TempWeaponLeanLoc);
+
+					/*
+					if (QuickLeanAmount < 0.0f || FreeLeanX < 0.0f) // left
+					{
+						TempWepLeanRot = FRotator(-25.0f, 0.0f, 0.0f);
+						TempWeaponLeanLoc = TempWepLeanRot.RotateVector(TempWeaponLeanLoc);
+					}
+					else if (QuickLeanAmount > 0.0f || FreeLeanX > 0.0f) // right
+					{
+						TempWepLeanRot = FRotator(25.0f, 0.0f, 0.0f);
+						TempWeaponLeanLoc = TempWepLeanRot.RotateVector(TempWeaponLeanLoc);
+					}
+					else
+					{
+						TempWepLeanRot = FRotator(0.0f, 0.0f, 0.0f);
+						TempWeaponLeanLoc = FVector(0, 0, 0);
+					}
+					*/
+
+					TempWeaponLeanLoc.Normalize();
+
+					MeshWeaponLeanOffset = FMath::VInterpTo(MeshWeaponLeanOffset, TempWeaponLeanLoc, DeltaTime, MeshspaceInterp);
+
+					MeshWeaponLeanRotation = FMath::RInterpTo(MeshWeaponLeanRotation, TempWepLeanRot, DeltaTime, MeshspaceInterp);
+				}
+			}
+
+			ClampFreelookRotation();
+
+			/* Alex: this overrides camera motion from the bone, therefore moved to anim graph transform chain by exposing FreeLookCache */
+			//OutResult.Rotation = FRotator(GetControlRotation().Pitch, GetControlRotation().Yaw, 0.0f) + FreeLookCache;
+
+
+			/* LEGACY CODE for first person system
+
+			// CAMERA TRANSFORM MODS
+
+			FRotator NewCameraRotation = GetControlRotation();
+			FVector CameraLoc = GetActorLocation();
+
+			if (GetController())
+				CameraLoc += GetFirstPersonCameraComponent()->GetRightVector() * (QuickLeanAmount + FreeLeanX);
+
+			FVector Velocity = GetVelocity();
+			Velocity = GetActorRotation().UnrotateVector(GetVelocity());
+
+			if (bCrouching)
+			{
+				if (GetVelocity().Size2D() < 50.0f)
+					CameraLoc.Z = (GetActorLocation() + LowerRelativeLocation).Z;
+				else
+					CameraLoc.Z = (GetActorLocation() + LowerRelativeLocation).Z + 20;
+
+			}
+			else
+				CameraLoc.Z = (GetActorLocation() + DefaultRelativeLocation).Z;
+
+			CameraLoc.Z += -FMath::Abs(QuickLeanAmount * 0.5) + FreeLeanZ;
+			NewCameraRotation.Roll = (QuickLeanAmount * 0.1) - (FreeLeanX * -0.1) + Velocity.Y * VelocityCameraRollMultiplier;
+
+
+
+			GetFirstPersonCameraComponent()->SetWorldLocation(FMath::VInterpTo(GetFirstPersonCameraComponent()->GetComponentLocation(), CameraLoc, DeltaTime, 9.0f));
+
+			//FirstPersonCameraComponent->SetRelativeLocation(FVector(0.0f, 0.0f, BaseEyeHeight)); // smooth view on stairs?
+			FirstPersonCameraComponent->GetCameraView(DeltaTime, OutResult);
+
+			FRotator CameraBoneRotation(GetMesh1P()->GetBoneQuaternion(TEXT("fp_camera"), (EBoneSpaces::Type)1));
+			FVector CameraBoneLocation = GetMesh1P()->GetBoneLocation(TEXT("fp_camera"), (EBoneSpaces::Type)1);
+
+			FRotator RotatedCameraBoneRotation = FRotator(-CameraBoneRotation.Roll, CameraBoneRotat5ion.Yaw, -CameraBoneRotation.Pitch);
+			FVector RotatedCameraBoneLocation = FVector(CameraBoneLocation.Y, -CameraBoneLocation.X, CameraBoneLocation.Z);
+
+			FRotationMatrix const CameraToWorld(OutResult.Rotation);
+
+			// loc
+			FVector const LocalOffset = CameraToWorld.TransformVector(RotatedCameraBoneLocation);
+			OutResult.Location += LocalOffset;
+
+			// rot
+			FRotationMatrix const AnimRotMat(RotatedCameraBoneRotation);
+			OutResult.Rotation = (AnimRotMat * CameraToWorld).Rotator();
+
+
+			if (GetController())
+				GetController()->SetControlRotation(FMath::RInterpTo(GetControlRotation(), NewCameraRotation, DeltaTime, 6.0f));
+
+			// WEAPON MESH MODS
+			FVector Default_WeaponAppliedOffset = FVector::ZeroVector;
+			FVector Aim_WeaponAppliedOffset = FVector::ZeroVector;
+
+			if (GetEquippedItem())
+			{
+				FTransform AimingMeshspaceTransform;
+				FTransform DefaultMeshspaceTransform;
+
+				GetEquippedItem()->GetMeshspaceTransform(DefaultMeshspaceTransform, AimingMeshspaceTransform);
+				Default_WeaponAppliedOffset = DefaultMeshspaceTransform.GetLocation();
+				Aim_WeaponAppliedOffset = AimingMeshspaceTransform.GetLocation();
+
+			}
+
+
+			if (GetEquippedItem() && !GetEquippedItem()->bDisableMeshspaceMovement)
+			{
+				FVector NewMesh1POffset = AdditionalMesh1POffset;
+
+				NewMesh1POffset.Y = AdditionalMesh1POffset.Y + -(QuickLeanAmount + FreeLeanX) / 10 + (GetVelocity().Y / 200.0f) + (Camera_RotationRate.Yaw * CameraRotationRateMeshSpaceMultiplier.Y) + FMath::Clamp(((PendingRecoil.Yaw) * MeshspaceRecoilMovementMultiplier.Y), -MeshspaceRecoilMovementMinMax.Y, MeshspaceRecoilMovementMinMax.Y);
+				NewMesh1POffset.Z = AdditionalMesh1POffset.Z + (FreeLeanZ / 20) + (GetVelocity().Z / 150.0f) + FMath::Clamp(((PendingRecoil.Pitch) * MeshspaceRecoilMovementMultiplier.Z), -MeshspaceRecoilMovementMinMax.Z, MeshspaceRecoilMovementMinMax.Z);
+				NewMesh1POffset.X = AdditionalMesh1POffset.X + GetVelocity().X * 0.02f - FMath::Clamp(((PendingRecoil.Yaw + PendingRecoil.Pitch) * MeshspaceRecoilMovementMultiplier.X), -MeshspaceRecoilMovementMinMax.X, MeshspaceRecoilMovementMinMax.X) + (GetControlRotation().GetNormalized().Pitch / 15) + (Camera_RotationRate.Yaw * CameraRotationRateMeshSpaceMultiplier.X);
+				NewMesh1POffset = NewMesh1POffset * MeshSpaceMovementMultiplier1P;
+				NewMesh1POffset += Default_WeaponAppliedOffset;
+
+
+				FVector ADSMesh1POffset = FVector::ZeroVector;
+
+				ADSMesh1POffset.Y = PendingRecoil.Yaw;
+				ADSMesh1POffset.X = -FMath::Clamp(((PendingRecoil.Yaw + PendingRecoil.Pitch) * 2.5f), 0.0f, 2.5f) + (GetControlRotation().GetNormalized().Pitch / 30);
+				ADSMesh1POffset.Z = GetVelocity().Z * 0.005f;
+				ADSMesh1POffset += Aim_WeaponAppliedOffset;
+
+				if (bAiming)
+				{
+					GetMesh1P()->SetRelativeLocation(FMath::VInterpTo(GetMesh1P()->GetRelativeTransform().GetLocation(), DefaultMesh1POffset + ADSMesh1POffset * GetMesh1P()->GetComponentScale(), DeltaTime, MeshspaceInterp));
+				}
+				else
+				{
+					GetMesh1P()->SetRelativeLocation(FMath::VInterpTo(GetMesh1P()->GetRelativeTransform().GetLocation(), DefaultMesh1POffset + NewMesh1POffset * GetMesh1P()->GetComponentScale(), DeltaTime, MeshspaceInterp));
+				}
+
+				// free aim concept
+				// clamp angles
+				// SOFT DEADZONE CLAMP AT FREE AIM LIMIT
+
+				float freeAimLimit = GetEquippedItem()->FreeAimLimit;
+				if (bAiming)
+				{
+					freeAimLimit *= 0.1f;
+				}
+				else
+				{
+					freeAimLimit *= 2.0f;
+				}
+
+				if (FreeAimCache.Pitch < -freeAimLimit)
+				{
+					FreeAimCache.Pitch = FMath::FInterpTo(FreeAimCache.Pitch, -freeAimLimit, DeltaTime, 20.0f);
+				}
+
+				if (FreeAimCache.Pitch > freeAimLimit)
+				{
+					FreeAimCache.Pitch = FMath::FInterpTo(FreeAimCache.Pitch, freeAimLimit, DeltaTime, 20.0f);
+				}
+
+				if (FreeAimCache.Yaw < -freeAimLimit)
+				{
+					FreeAimCache.Yaw = FMath::FInterpTo(FreeAimCache.Yaw, -freeAimLimit, DeltaTime, 20.0f);
+				}
+
+				if (FreeAimCache.Yaw > freeAimLimit)
+				{
+					FreeAimCache.Yaw = FMath::FInterpTo(FreeAimCache.Yaw, freeAimLimit, DeltaTime, 20.0f);
+				}
+
+				// HARD DEADZONE CLAMP AT FREE AIM LIMIT * X
+				//FreeAimCache.Pitch = FMath::ClampAngle(FreeAimCache.Pitch, -GetEquippedItem()->FreeAimLimit * 4, GetEquippedItem()->FreeAimLimit * 4);
+				//FreeAimCache.Yaw = FMath::ClampAngle(FreeAimCache.Yaw, -GetEquippedItem()->FreeAimLimit * 4, GetEquippedItem()->FreeAimLimit * 4);
+				FreeAimCache.Normalize();
+				GetMesh1P()->SetRelativeRotation(FRotator(0, FreeAimCache.Yaw - 90.0f, FreeAimCache.Pitch));
+			}
+			else
+			{
+				GetMesh1P()->SetRelativeLocation(FMath::VInterpTo(GetMesh1P()->GetRelativeTransform().GetLocation(), DefaultMesh1POffset * GetMesh1P()->GetComponentScale(), DeltaTime, MeshspaceInterp));
+			}
+			*/
+
+		}
+		#if WITH_EDITOR
+		else if (ThirdPersonCameraComponent && ThirdPersonCameraComponent->IsActive())
+		{
+			ThirdPersonCameraComponent->GetCameraView(DeltaTime, OutResult);
+		}
+		#endif
+		else
+		{
+			GetActorEyesViewPoint(OutResult.Location, OutResult.Rotation);
+		}
+	}
+	else
+	{
+		FirstPersonCameraComponent->GetCameraView(DeltaTime, OutResult);
+	}
+}
+
+void APlayerCharacter::ToggleFreeThirdPerson()
+{
+#if WITH_EDITOR
+	// make sure camera can be freely rotated around char
+	if (!bIsThirdPerson)
+	{
+		ThirdPersonCameraArm->bUsePawnControlRotation = false;
+		ThirdPersonFreeLook = true;
+	}
+	else
+	{
+		ThirdPersonCameraArm->bUsePawnControlRotation = true;
+		ThirdPersonFreeLook = false;
+	}
+
+	ToggleThirdPerson();
+#endif
+}
+
+void APlayerCharacter::ToggleThirdPerson()
+{
+#if WITH_EDITOR
+	if (!ThirdPersonCameraComponent || !FirstPersonCameraComponent)
+		return;
+	
+	if (!bIsThirdPerson)
+	{
+		// update the player meshes and switch to 3rd camera
+
+		//Activate 3rd person
+		FirstPersonCameraComponent->Deactivate();
+		ThirdPersonCameraComponent->Activate();
+
+		bIsThirdPerson = true;
+
+		GetMesh1P()->SetOwnerNoSee(true);
+		GetMesh()->SetOwnerNoSee(false);
+		MeshBody1P->SetOwnerNoSee(true);
+		FaceMesh->SetOwnerNoSee(false);
+
+		// reveal gear aswell
+		MeshGearSlot->SetOwnerNoSee(false);
+
+		// also update weapon mesh parts visiblity
+		if (GetEquippedItem())
+		{
+			GetEquippedItem()->ItemMesh->SetOwnerNoSee(true);
+			GetEquippedItem()->ItemMesh->SetOwnerNoSee(false);
+			GetEquippedItem()->AttachStatic();
+		}
+	}
+	else
+	{
+		// update and hide 3rd mesh / switch to fp cam
+
+		//Activate 1st person
+		ThirdPersonCameraComponent->Deactivate();
+		FirstPersonCameraComponent->Activate();
+
+		GetMesh1P()->SetOwnerNoSee(false);
+		GetMesh()->SetOwnerNoSee(true);
+		MeshBody1P->SetOwnerNoSee(false);
+		FaceMesh->SetOwnerNoSee(true);
+
+		// hide gear aswell
+		MeshGearSlot->SetOwnerNoSee(true);
+
+		// also update weapon mesh parts visiblity
+		if (GetEquippedItem())
+		{
+			// if we are a shield also update the visiblity of that
+			GetEquippedItem()->ItemMesh->SetOwnerNoSee(false);
+			GetEquippedItem()->AttachStatic();
+		}
+
+		bIsThirdPerson = false;
+	}
+#endif
+}
+
+void APlayerCharacter::AdjustScopeOffsetVertical(float NewOffset)
+{
+	ABaseMagazineWeapon* MagWeapon = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+	if (MagWeapon)
+	{
+		if (MagWeapon->GetScopedAttachment())
+		{
+			bool bScopeModFound = false;
+			for (int32 i = 0; i < MagWeapon->GetScopedAttachment()->ScopeMods.Num(); i++)
+			{
+				if (MagWeapon->GetScopedAttachment()->GetScopeMods(MagWeapon) == MagWeapon->GetScopedAttachment()->ScopeMods[i])
+				{
+					bScopeModFound = true;
+					MagWeapon->GetScopedAttachment()->ScopeMods[i].VerticalOffset = NewOffset;
+				}
+			}
+			if (!bScopeModFound)
+			{
+				FScopeModifications ScopeMod;
+				ScopeMod.WeaponClass = MagWeapon->GetClass();
+				ScopeMod.VerticalOffset = NewOffset;
+				MagWeapon->GetScopedAttachment()->ScopeMods.AddUnique(ScopeMod);
+			}
+		}
+	}
+}
+
+void APlayerCharacter::AdjustScopeOffsetHorizontal(float NewOffset)
+{
+	ABaseMagazineWeapon* MagWeapon = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+	if (MagWeapon)
+	{
+		if (MagWeapon->GetScopedAttachment())
+		{
+			bool bScopeModFound = false;
+			for (int32 i = 0; i < MagWeapon->GetScopedAttachment()->ScopeMods.Num(); i++)
+			{
+				if (MagWeapon->GetScopedAttachment()->GetScopeMods(MagWeapon) == MagWeapon->GetScopedAttachment()->ScopeMods[i])
+				{
+					bScopeModFound = true;
+					MagWeapon->GetScopedAttachment()->ScopeMods[i].HorizontalOffset = NewOffset;
+				}
+			}
+			if (!bScopeModFound)
+			{
+				FScopeModifications ScopeMod;
+				ScopeMod.WeaponClass = MagWeapon->GetClass();
+				ScopeMod.HorizontalOffset = NewOffset;
+				MagWeapon->GetScopedAttachment()->ScopeMods.AddUnique(ScopeMod);
+			}
+		}
+	}
+}
+
+void APlayerCharacter::SetThirdPerson(bool bThirdPerson)
+{
+	// TODO, only in non-shipping builds for now
+	if (bThirdPerson)
+	{
+		GetMesh1P()->SetOwnerNoSee(true);
+		GetMesh()->SetOwnerNoSee(false);
+
+	}
+	else
+	{
+
+		GetMesh1P()->SetOwnerNoSee(false);
+		GetMesh()->SetOwnerNoSee(true);
+	}
+}
+
+void APlayerCharacter::HidePlayer()
+{
+	GetMesh1P()->SetHiddenInGame(true);
+	GetMesh()->SetHiddenInGame(true);
+
+	// also update weapon mesh parts visiblity
+	ABaseWeapon* Weapon = Cast<ABaseWeapon>(GetEquippedItem());
+	if (Weapon)
+	{
+		Weapon->ItemMesh->SetHiddenInGame(true);
+	}
+
+	ABaseMagazineWeapon* MagWeapon = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+	if (MagWeapon)
+	{
+		MagWeapon->Mag_01_Comp->SetHiddenInGame(true);
+		MagWeapon->Mag_02_Comp->SetHiddenInGame(true);
+		MagWeapon->Mag_01_Extra_Comp->SetHiddenInGame(true);
+		MagWeapon->Mag_02_Extra_Comp->SetHiddenInGame(true);
+		MagWeapon->Mag_01_Bullets_Comp->SetHiddenInGame(true);
+		MagWeapon->Mag_02_Bullets_Comp->SetHiddenInGame(true);
+	}
+}
+
+void APlayerCharacter::ShowPlayer()
+{
+	GetMesh1P()->SetHiddenInGame(false);
+	GetMesh()->SetHiddenInGame(false);
+
+	// also update weapon mesh parts visiblity
+	ABaseWeapon* Weapon = Cast<ABaseWeapon>(GetEquippedItem());
+	if (Weapon)
+	{
+		Weapon->ItemMesh->SetHiddenInGame(false);
+	}
+
+	ABaseMagazineWeapon* MagWeapon = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+	if (MagWeapon)
+	{
+		MagWeapon->Mag_01_Comp->SetHiddenInGame(false);
+		MagWeapon->Mag_02_Comp->SetHiddenInGame(false);
+
+		if (MagWeapon->Mag_01_Extra_Comp)
+			MagWeapon->Mag_01_Extra_Comp->SetHiddenInGame(false);
+
+		if (MagWeapon->Mag_02_Extra_Comp)
+			MagWeapon->Mag_02_Extra_Comp->SetHiddenInGame(false);
+		MagWeapon->Mag_01_Bullets_Comp->SetHiddenInGame(false);
+		MagWeapon->Mag_02_Bullets_Comp->SetHiddenInGame(false);
+	}
+}
+
+#if WITH_EDITOR
+void APlayerCharacter::DoNetUpdate()
+{
+	TArray<AActor*> OutActors;
+	UGameplayStatics::GetAllActorsOfClass(GetWorld(), APlayerCharacter::StaticClass(), OutActors);
+	for (AActor* actor : OutActors)
+	{
+		APlayerCharacter* pc = Cast<APlayerCharacter>(actor);
+		if (pc)
+		{
+			pc->ForcePropertyCompare();
+			pc->ForceNetRelevant();
+			pc->ForceNetUpdate();
+			for (int32 i = 0; i < GetInventoryComponent()->GetInventoryItems().Num(); i++)
+			{
+				ABaseItem* bi = Cast<ABaseItem>(GetInventoryComponent()->GetInventoryItems()[i]);
+				if (bi)
+				{
+					bi->ForcePropertyCompare();
+					bi->ForceNetRelevant();
+					bi->ForceNetUpdate();
+				}
+			}
+		}
+	}
+}
+#endif
+
+//////////////////////////////////////////////////
+//
+//	Cheat codes
+
+void APlayerCharacter::ToggleGodMode()
+{
+#if !UE_BUILD_SHIPPING
+	Server_ToggleGodMode();
+#endif
+}
+
+void APlayerCharacter::Server_ToggleGodMode_Implementation()
+{
+#if !UE_BUILD_SHIPPING
+	if (CHECK_DEBUG_SUBSYSTEM)
+	{
+		DEBUG_SUBSYSTEM->ToggleGodMode();
+		bGodMode = DEBUG_SUBSYSTEM->bPlayerGodMode;
+
+		if (bGodMode)
+		{
+			GetRONPlayerController()->ClientMessage("god mode ON");
+		}
+		else
+		{
+			GetRONPlayerController()->ClientMessage("god mode OFF");
+		}
+		for (TActorIterator<ASWATCharacter> It(GetWorld()); It; ++It)
+		{
+			ASWATCharacter* SWAT = *It;
+			SWAT->SetGodMode(bGodMode);
+		}
+	}
+#endif
+}
+
+void APlayerCharacter::ToggleFastMovement()
+{
+#if !UE_BUILD_SHIPPING
+	Server_ToggleFastMovement();
+#endif
+}
+
+void APlayerCharacter::Server_ToggleFastMovement_Implementation()
+{
+#if !UE_BUILD_SHIPPING
+	bHoldingSprint = !bHoldingSprint;
+	if (bHoldingSprint)
+	{
+		SpeedModifier_SprintMax = 10.0;
+	}
+	else
+	{
+		SpeedModifier_SprintMax = 1.3;
+	}
+#endif
+}
+
+void APlayerCharacter::ToggleNoTarget()
+{
+#if !UE_BUILD_SHIPPING
+	Server_ToggleNoTarget();
+#endif
+}
+
+void APlayerCharacter::Server_ToggleNoTarget_Implementation()
+{
+#if !UE_BUILD_SHIPPING
+	bNoTarget = !bNoTarget;
+	if (bNoTarget)
+	{
+		GetRONPlayerController()->ClientMessage("notarget ON");
+		PerceptionStimuliComp->UnregisterFromPerceptionSystem();
+	}
+	else
+	{
+		GetRONPlayerController()->ClientMessage("notarget OFF");
+		PerceptionStimuliComp->RegisterForSense(UAISense_Damage::StaticClass());
+		PerceptionStimuliComp->RegisterForSense(UAISense_Touch::StaticClass());
+		PerceptionStimuliComp->RegisterForSense(UAISense_Hearing::StaticClass());
+		PerceptionStimuliComp->RegisterForSense(UAISense_Sight::StaticClass());
+		PerceptionStimuliComp->RegisterWithPerceptionSystem();
+	}
+#endif
+}
+
+void APlayerCharacter::DebugDetachAllComponentsAndSubComponents()
+{
+	for (TActorIterator<APlayerCharacter>It(GetWorld()); It; ++It)
+	{
+		const APlayerCharacter* pc = *It;
+		if (pc->IsPlayerControlled())
+			continue;
+		
+		TArray<USceneComponent*> SceneComponents;
+		pc->GetComponents(SceneComponents);
+		for (USceneComponent* SceneComp : SceneComponents)
+		{
+			SceneComp->DestroyComponent();
+		}
+		for (const ABaseItem* bi :  GetInventoryComponent()->GetInventoryItems())
+		{
+			bi->GetComponents(SceneComponents);
+			for (USceneComponent* SceneComp : SceneComponents)
+			{
+				SceneComp->DestroyComponent();
+			}
+		}
+		
+	}
+}
+
+void APlayerCharacter::ToggleCrosshairOverlay()
+{
+	if (UBpGameplayHelperLib::GetWidgetDataFromLookupData("CrossHairOverlay").WidgetClass)
+	{
+		bool bRemovedAnyWidgets = false;
+		
+		for (TObjectIterator<UUserWidget> Itr; Itr; ++Itr)
+		{
+			UUserWidget* LiveWidget = *Itr;
+
+			/* If the Widget has no World, Ignore it (It's probably in the Content Browser!) */
+			if (!LiveWidget->GetWorld() || LiveWidget->GetWorld() != GetWorld())
+			{
+				continue;
+			}
+			else if (LiveWidget->GetClass() == UBpGameplayHelperLib::GetWidgetDataFromLookupData("CrossHairOverlay").WidgetClass)
+			{
+				if (LiveWidget->IsInViewport())
+				{
+					bRemovedAnyWidgets = true;
+					LiveWidget->RemoveFromParent();
+				}
+				LiveWidget = nullptr;
+			}
+		}
+
+		if (!bRemovedAnyWidgets)
+		{
+			UUserWidget* Widget = CreateWidget<UUserWidget>(GetWorld(), UBpGameplayHelperLib::GetWidgetDataFromLookupData("CrossHairOverlay").WidgetClass);
+			if (Widget)
+			{
+				Widget->AddToViewport(0);
+			}
+		}
+
+	}
+}
+
+void APlayerCharacter::OnRep_BaseAimRotation()
+{
+	Server_BaseAimRotation.Normalize();
+}
+
+void APlayerCharacter::Server_UpdateCameraRotationRate_Implementation(FRotator NewCameraRotRate)
+{
+	Camera_RotationRate = NewCameraRotRate;
+}
+
+APlayerCharacter* APlayerCharacter::GetClosestPlayerCharacter(ETeamType Team, float& OutClosestDistance, bool bExcludeArrested)
+{
+	APlayerCharacter* OutClosestCharacter = nullptr;
+	OutClosestDistance = FLT_MAX;
+
+	for (TActorIterator<APlayerCharacter> It(GetWorld()); It; ++It)
+	{
+		APlayerCharacter* Character = *It;
+
+		if (Character == nullptr)
+		{	// not a PlayerCharacter
+			continue;
+		}
+
+		if (Character == this)
+		{	// is ourself
+			continue;
+		}
+
+		if (Character->IsDeadOrUnconscious())
+			continue;
+
+		if (bExcludeArrested && Character->IsArrested())
+			continue;
+
+		if (Team != ETeamType::TT_NONE)
+		{	// all are allowed
+			if (Team == ETeamType::TT_SQUAD)
+			{
+				if (Character->GetTeam() != ETeamType::TT_SERT_BLUE && Character->GetTeam() != ETeamType::TT_SERT_RED)
+				{	// not a member of gold team
+					continue;
+				}
+			}
+			else if (Team != Character->GetTeam())
+			{	// team does not match
+				continue;
+			}
+		}
+
+		const float Distance = FVector::Dist(Character->GetActorLocation(), GetActorLocation());
+		if (Distance < OutClosestDistance)
+		{
+			OutClosestDistance = Distance;
+			OutClosestCharacter = Character;
+		}
+	}
+
+	return OutClosestCharacter;
+}
+
+TArray<APlayerCharacter*> APlayerCharacter::GetAllOtherPlayerCharacters(ETeamType Team)
+{
+	TArray<APlayerCharacter*> OutCharacters;
+
+	for (TActorIterator<APlayerCharacter> It(GetWorld()); It; ++It)
+	{
+		APlayerCharacter* Character = *It;
+
+		if (Character == nullptr)
+		{	// not a PlayerCharacter
+			continue;
+		}
+
+		if (Character == this)
+		{	// is ourself
+			continue;
+		}
+
+		if (Team != ETeamType::TT_NONE)
+		{	// all are allowed
+			if (Team == ETeamType::TT_SQUAD)
+			{
+				if (Character->GetTeam() != ETeamType::TT_SERT_BLUE && Character->GetTeam() != ETeamType::TT_SERT_RED)
+				{	// not a member of gold team
+					continue;
+				}
+			}
+			else if (Team != Character->GetTeam())
+			{	// team does not match
+				continue;
+			}
+		}
+
+		OutCharacters.Add(Character);
+	}
+
+	return OutCharacters;
+}
+
+bool APlayerCharacter::ShouldEnableDepthFade()
+{
+	if (bIsLowReadyFromWall && IsAnimationBlocking())
+		return true;
+	
+	if (IsLowReady() && bIsLowReadyFromWall)
+		return true;
+
+	if (GetEquippedItem() && GetEquippedItem()->ContainsItemCategory(EItemCategory::IC_Primary))
+	{
+		return IsLowReady() && bIsLowReadyFromWall;
+	}
+	return true;
+}
+
+void APlayerCharacter::Interact_Implementation(AReadyOrNotCharacter* InteractInstigator, UInteractableComponent* InInteractableComponent)
+{
+	if (!InteractInstigator || !InInteractableComponent)
+		return;
+
+	APlayerCharacter* InstigatorCharacter = Cast<APlayerCharacter>(InteractInstigator);
+
+	if (InstigatorCharacter)
+	{
+		if (/*AReadyOrNotGameState* GS = */GetWorld()->GetGameState<AReadyOrNotGameState>())
+		{
+			/*if (IsDowned())
+			{
+				InstigatorCharacter->StartReviving(this);
+			
+				return;
+			}
+			*/
+
+			if (CanArrest())
+			{
+				InstigatorCharacter->Server_InstaStartArrest_Implementation(this);
+				return;
+			}
+
+			/*if (IsArrested() && InstigatorCharacter->GetTeam() == GetTeam())
+			{
+				InstigatorCharacter->Server_InstaStartFree_Implementation(this);
+			}*/
+		}
+	}
+
+	Super::Interact_Implementation(InteractInstigator, InInteractableComponent);
+}
+
+FName APlayerCharacter::DetermineAnimatedIcon_Implementation() const
+{
+	if (IsLocalPlayer())
+		return NAME_None;
+	
+	if (IsDowned())
+	{
+		if (const APlayerController* PlayerController = UBpGameplayHelperLib::GetLocalPlayerController(GetWorld()))
+		{
+			if (const APlayerCharacter* PlayerCharacter = Cast<APlayerCharacter>(PlayerController->GetPawn()))
+			{
+				if (GetTeam() == PlayerCharacter->GetTeam())
+				{
+					return "Revive";
+				}
+			}
+		}
+
+		return NAME_None;
+	}
+	
+	return Super::DetermineAnimatedIcon_Implementation();
+}
+
+USkeletalMesh* APlayerCharacter::GetAppropriateFPMesh()
+{
+	for (int32 i = 0; i < GetInventoryComponent()->GetInventoryItems().Num(); i++)
+	{
+		if (!GetInventoryComponent()->GetInventoryItems()[i])
+			continue;
+		
+		USkeletalMesh* OverrideMeshFP = ArmorOverrideMapFP.FindOrAdd(GetInventoryComponent()->GetInventoryItems()[i]->GetClass());
+	    if (OverrideMeshFP)
+	    {
+	        return OverrideMeshFP;
+	    }
+	}
+	
+	return GetClass()->GetDefaultObject<APlayerCharacter>()->GetMesh1P()->SkeletalMesh;
+}
+
+FSlateBrush APlayerCharacter::GetPingIcon_Implementation()
+{
+	return FSlateBrush();
+}
+
+FText APlayerCharacter::GetPingText_Implementation()
+{
+	if (GetInventoryComponent()->GetSpawnedGear().Character)
+		return FText::FromName(GetInventoryComponent()->GetSpawnedGear().Character->HandleName);
+
+	return FText::FromString("");
+}
+
+FVector APlayerCharacter::GetPingLocation_Implementation()
+{
+	return GetActorLocation();
+}
+
+float APlayerCharacter::GetPingDuration_Implementation()
+{
+	return 10.0f;
+}
+
+bool APlayerCharacter::CanPing_Implementation()
+{
+	return true;
+}
+
+void APlayerCharacter::StartBleeding()
+{
+	if (BleedComponent)
+		BleedComponent->StartBleeding();
+}
+
+void APlayerCharacter::DestroyNonDevelopmentComponents()
+{
+	DESTROY_COMPONENT(ThirdPersonCameraArm)
+	DESTROY_COMPONENT(ThirdPersonCameraComponent)
+}
+
+void APlayerCharacter::PushOverlappingAI()
+{
+	if (!IsPlayerControlled())
+		return;
+	
+	if (!IsActive())
+		return;
+	
+	if (bIsPairedInteractionPlaying)
+		return;
+
+	SCOPE_CYCLE_COUNTER(STAT_PushNearbyCharacters);
+
+	const TArray<ACyberneticCharacter*>& AllAI = GetWorld()->GetGameState<AReadyOrNotGameState>()->AllAICharacters;
+	
+	for (ACyberneticCharacter* Character : AllAI)
+	{
+		if (!Character)
+			return;
+		
+		if (ACyberneticController* CyberneticController = Character->GetCyberneticsController())
+		{
+			if (Character->IsCarried())
+			{
+				Character->ArrestedPushLocation = FVector::ZeroVector;
+				continue;
+			}
+
+			if (Character->IsDeadOrUnconscious() || Character->IsIncapacitated() || Character->IsPlayingDead() || Character->IsInRagdoll())
+				continue;
+			
+			FVector CharacterLocation = Character->GetActorLocation();
+			
+			bool bAimingAtAI = false;
+			const bool bDisqualifiers = !CyberneticController->IsSWAT() ||
+										CyberneticController->IsCharacterKnownEnemy(this) ||
+										CyberneticController->IsCharacterEnemy(this) ||
+										CyberneticController->GetCurrentActivity<UMoveActivity>() ||
+										CyberneticController->GetCurrentActivity<UMoveToActivity>() ||
+										CyberneticController->GetCurrentActivity<UTeamStackUpActivity>() ||
+										CyberneticController->GetCurrentActivity<UDoorInteractionActivity>() ||
+										CyberneticController->GetCurrentActivity<UScanDoorActivity>();
+
+			//float Dot = FVector::DotProduct(GetActorForwardVector(), (Character->GetActorLocation() - GetActorLocation()).GetSafeNormal());
+			//LOG_NUMBER(Dot);
+			
+			if (!bDisqualifiers)
+			{
+				if (FVector::DotProduct(GetActorForwardVector(), (Character->GetActorLocation() - GetActorLocation()).GetSafeNormal()) > 0.95f)
+				{
+					if (FirstPersonCameraComponent->GetComponentRotation().Pitch > -10.0f &&
+						FirstPersonCameraComponent->GetComponentRotation().Pitch < 10.0f)
+					{
+						const float Distance = FVector::Distance(Character->GetActorLocation(), GetActorLocation());
+						
+						if (bAiming && Distance < 1000.0f && GetEquippedWeapon() && Character->HasLineOfSightToCharacter(this))
+						{
+							bAimingAtAI = true;
+						}
+					}
+				}
+			}
+
+			if (bAimingAtAI)
+			{
+				FVector Point = FMath::ClosestPointOnLine(GetActorLocation(), GetActorLocation() + GetActorForwardVector() * 5000.0f, Character->GetActorLocation());
+				//DrawDebugPoint(GetWorld(), Point, 20.0f, FColor::Purple, false, 0.033f);
+
+				CyberneticController->PushCharacter(Character->GetActorLocation() + -(Point - Character->GetActorLocation()).GetSafeNormal2D() * 100.0f, false);
+
+				//DrawDebugDirectionalArrow(GetWorld(), Character->GetActorLocation(), Character->GetActorLocation() + -(Point - Character->GetActorLocation()).GetSafeNormal2D() * 100.0f, 10.0f, FColor::Purple, false, 0.033f, 0, 1.0f);
+			}
+			
+			bool bCanBePushed = true;
+			if (CyberneticController->GetCurrentActivity())
+			{
+				if (!CyberneticController->GetCurrentActivity()->CanBePushed())
+				{
+					bCanBePushed = false;
+				}
+			}
+		
+			if (Character->IsFullBodyMontagePlaying())
+			{
+				bCanBePushed = false;
+			}
+			
+			float Dist = FVector::Distance(CharacterLocation, GetActorLocation());
+			if (Dist < 100.0f && bCanBePushed)
+			{
+				//FVector v1 = UKismetMathLibrary::FindLookAtRotation(GetActorLocation(), OtherCharacterLocation).Vector();
+				//FVector v2 = GetActorRotation().Vector();
+
+				if (CyberneticController->GetCharacter()->IsArrestedOrSurrendered())
+				{
+					if (CyberneticController->GetCharacter()->ArrestedPushLocation == FVector::ZeroVector)
+					{
+						/*
+						FVector Start1 = CharacterLocation;
+						FVector End1 = Start1 + (CharacterLocation - GetActorLocation()).GetSafeNormal2D() * 80.0f;
+						//DrawDebugDirectionalArrow(GetWorld(), Start1, End1, 50.0f, FColor::Green, false, 0.06f, 0, 1.5f);
+						if (const UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld()))
+						{
+							FNavLocation NavLocation;
+							if (NavSys->ProjectPointToNavigation(End1, NavLocation, FVector(50.0f, 50.0f, 100.0f)))
+							{
+								//DrawDebugBox(GetWorld(), NavLocation.Location, FVector(5.0f), FColor::Purple, false, 0.06f, 0, 1.5f);
+								CyberneticController->GetCharacter()->ArrestedPushLocation = NavLocation.Location;
+							}
+						}
+						*/
+						
+						FCollisionObjectQueryParams CollisionObjectQueryParams;
+						CollisionObjectQueryParams.AddObjectTypesToQuery(ECC_WorldStatic);
+						CollisionObjectQueryParams.AddObjectTypesToQuery(ECC_WorldDynamic);
+						CollisionObjectQueryParams.AddObjectTypesToQuery(ECC_DOOR);
+						CollisionObjectQueryParams.AddObjectTypesToQuery(ECC_Pawn);
+						
+						const FVector Start = Character->GetMesh()->GetBoneLocation("spine_1");
+
+						constexpr float Angle = 45.0f;
+						constexpr int32 NumberOfTraces = 360/Angle;
+						for (int32 i = 0; i < NumberOfTraces; i++)
+						{
+							FHitResult LOSTest;
+					
+							GetWorld()->LineTraceSingleByObjectType(LOSTest, Start, Start + FRotator(0.0f, i * Angle + Character->GetActorRotation().Yaw, 0.0f).Vector() * 150.0f, CollisionObjectQueryParams, Character->GetCollisionQueryParameters());
+							//DrawDebugLine(GetWorld(), LOSTest.TraceStart, LOSTest.TraceEnd, LOSTest.bBlockingHit ? FColor::Red : FColor::Green, false, 10.0f, 0, 1.0f);
+							if (!LOSTest.bBlockingHit)
+							{
+								FHitResult Hit;
+								FVector BoxStart = Start + FRotator(0.0f, i * Angle + Character->GetActorRotation().Yaw, 0.0f).Vector() * 150.0f;
+								BoxStart.Z += 30.0f;
+								UKismetSystemLibrary::BoxTraceSingleForObjects(this, BoxStart, BoxStart , FVector(50.0f, 50.0f, 50.0f), FRotator::ZeroRotator, {UEngineTypes::ConvertToObjectType(ECC_WorldStatic), UEngineTypes::ConvertToObjectType(ECC_WorldDynamic), UEngineTypes::ConvertToObjectType(ECC_DOORWAY), UEngineTypes::ConvertToObjectType(ECC_Pawn)}, false, {Character, this}, EDrawDebugTrace::ForOneFrame, Hit, true);
+								if (!Hit.bBlockingHit)
+								{
+									if (const UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld()))
+									{
+										FNavLocation NavLocation;
+										if (NavSys->ProjectPointToNavigation(LOSTest.TraceEnd, NavLocation, FVector(50.0f, 50.0f, 100.0f)))
+										{
+											CyberneticController->GetCharacter()->ArrestedPushLocation = NavLocation.Location;
+											break;
+										}
+									}
+								}
+							}
+						}
+					}
+					
+					continue;
+				}
+
+				// Check if the player is trying to accelerate since we're on server and can't check input
+				bool bMoving = GetVelocity().Size() > 50.0f;
+				
+				bool bIsTeamMoving = CyberneticController->GetCurrentActivity<UMoveActivity>() != nullptr;
+				bool bIsStacking = CyberneticController->GetCurrentActivity<UTeamStackUpActivity>() != nullptr;
+
+				if (bMoving && ((!bDisqualifiers && !bIsTeamMoving) || bIsStacking))
+				{
+					FVector DirectionToAI = (CharacterLocation - GetActorLocation()).GetSafeNormal2D();
+					if (FVector::DotProduct(DirectionToAI, GetVelocity().GetSafeNormal2D()) > 0.2f)
+					{
+						FVector Point = FMath::ClosestPointOnLine(GetActorLocation(), GetActorLocation() + GetVelocity().GetSafeNormal() * 5000.0f, CharacterLocation);
+						
+						//DrawDebugPoint(GetWorld(), Point, 20.0f, FColor::Purple, false, 0.033f);
+
+						FVector AvoidanceDirection = -(Point - CharacterLocation).GetSafeNormal2D();
+
+						//FVector A = FMath::VInterpTo(CharacterLocation, Point + GetActorForwardVector() * GetCapsuleComponent()->GetUnscaledCapsuleRadius(), GetWorld()->DeltaTimeSeconds, 2.0f);
+						//FVector A = Point + AvoidanceDirection * 30;//GetCapsuleComponent()->GetUnscaledCapsuleRadius();
+						//Character->SetActorLocation(A, true, nullptr, ETeleportType::TeleportPhysics);
+						//Character->SetActorLocation();//, true, nullptr, ETeleportType::TeleportPhysics);
+
+						//UReadyOrNotAISystem::ProjectPointToNav(CharacterLocation + DirectionToAI * 30, Character->AvoidanceLocation);
+						//Character->AvoidanceLocation = CharacterLocation + DirectionToAI * 30;
+						CyberneticController->PushCharacter(CharacterLocation + AvoidanceDirection * 100.0f, false);
+					}
+				}
+			}
+			// move out of way if player is moving towards us
+			else
+			{
+				const bool bMoving = GetVelocity().Size() > 150.0f;
+
+				float TimeAvoiding = 0.1f;
+				if (UMoveToActivity* MoveToActivity = CyberneticController->GetActivity<UMoveToActivity>())
+					TimeAvoiding = MoveToActivity->GetElapsedActivityTime();
+				
+				bool bIsTeamMoving = CyberneticController->GetCurrentActivity<UMoveActivity>() != nullptr;
+				
+				bool bIsStacking = CyberneticController->GetCurrentActivity<UTeamStackUpActivity>() != nullptr;
+				
+				if (bMoving && !bIsTeamMoving && !bDisqualifiers && !bIsStacking && Character->HasLineOfSightToCharacter(this) && TimeAvoiding >= 0.1f)
+				{
+					if (FVector::Distance(CharacterLocation, GetActorLocation()) < 300.0f)
+					{
+						FVector DirectionToAI = (CharacterLocation - GetActorLocation()).GetSafeNormal2D();
+						if (FVector::DotProduct(DirectionToAI, GetVelocity().GetSafeNormal2D()) > 0.99f)
+						{
+							FVector Point = FMath::ClosestPointOnLine(GetActorLocation(), GetActorLocation() + GetVelocity().GetSafeNormal() * 5000.0f, CharacterLocation);
+
+							FVector AvoidanceDirection = -(Point - CharacterLocation).GetSafeNormal2D();
+
+							CyberneticController->PushCharacter(CharacterLocation + AvoidanceDirection * 100.0f, false);
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+void APlayerCharacter::MoveBlockedBy(const FHitResult& Impact)
+{
+	if (ACyberneticCharacter* AI = Cast<ACyberneticCharacter>(Impact.GetActor()))
+	{
+		if (AI->IsOnSWATTeam())
+		{
+			bool bCanBePushed = true;
+			if (AI->GetCyberneticsController())
+			{
+				if (AI->GetCyberneticsController()->GetCurrentActivity())
+				{
+					if (!AI->GetCyberneticsController()->GetCurrentActivity()->CanBePushed())
+					{
+						bCanBePushed = false;
+					}
+				}
+			
+				if (AI->IsAny3PMontageActive())
+				{
+					bCanBePushed = false;
+				}
+
+				if (AI->GetCyberneticsController()->GetCurrentActivity<UTeamBreachAndClearActivity>() ||
+					AI->GetCyberneticsController()->GetCurrentActivity<UTeamStackUpActivity>() ||
+					AI->GetCyberneticsController()->GetCurrentActivity<UDoorInteractionActivity>())
+				{
+					bCanBePushed = false;
+				}
+			}
+
+			if (bCanBePushed)
+			{
+				FVector Point = FMath::ClosestPointOnLine(GetActorLocation(), GetActorLocation() + GetVelocity().GetSafeNormal() * 5000.0f, AI->GetActorLocation());
+				FVector AvoidanceDirection = -(Point - AI->GetActorLocation()).GetSafeNormal2D();
+
+				FHitResult Hit;
+				FCollisionQueryParams CollisionQueryParams;
+				CollisionQueryParams.AddIgnoredActor(this);
+				CollisionQueryParams.AddIgnoredActor(AI);
+
+				FVector A;
+				if (GetWorld()->LineTraceSingleByChannel(Hit, AI->GetActorLocation(), AI->GetActorLocation() + AvoidanceDirection * 50.0f, ECC_Visibility, CollisionQueryParams))
+				{
+					A = Hit.Location + Hit.Normal * 50;
+				}
+				else
+				{
+					A = AI->GetActorLocation() + AvoidanceDirection * 50.0f;
+				}
+				AI->AvoidanceLocation = A;
+				AI->AvoidanceTime = 0.5f;
+				
+				//UReadyOrNotAISystem::ProjectPointToNav(A, AI->AvoidanceLocation);
+			}
+		}
+	}
+}
+
+void APlayerCharacter::DestroyPlayerViewActor()
+{
+	if (PlayerViewActor)
+	{
+		PlayerViewActor->Destroy(true);
+		PlayerViewActor = nullptr;
+	}
+}
+
+void APlayerCharacter::TryNextPlayerView_Released()
+{
+	const int32 NumPlayersOnTeam = GetAvaliablePlayersForTeamView().Num();
+
+	if ((GetWorld()->GetTimerManager().IsTimerActive(TH_TeamViewInput) || TeamViewInputHoldTime <= 0.0f) && NumPlayersOnTeam > 0)
+	{
+		UReadyOrNotFunctionLibrary::StopCallbackTimer(this, TH_TeamViewInput);
+
+		if (PlayerViewActor)
+		{
+			PlayerViewActor->TryNextView();
+		}
+	}
+}
+
+void APlayerCharacter::TryNextPlayerView_Pressed()
+{
+	if (PlayerViewActor && !PlayerViewActor->IsSwitchingView() && TeamViewInputHoldTime > 0.0f)
+		UReadyOrNotFunctionLibrary::StartTimerForCallback(TH_TeamViewInput, this, &APlayerCharacter::ClosePlayerView, TeamViewInputHoldTime);
+}
+
+void APlayerCharacter::ClosePlayerView()
+{
+	if (PlayerViewActor && CurrentViewCharacter)
+	{
+		PlayerViewActor->TryNextView(true);
+	}
+}
+
+void APlayerCharacter::NextPlayerView(const bool bRequestClose, const bool bIncludeDeadViews)
+{
+	if (bRequestClose)
+	{
+		CurrentTeamViewIndex = -1;
+		CurrentViewCharacter = nullptr;
+		PlayerViewActor->SetViewPlayer(nullptr);
+		PlayerViewActor->bShouldCaptureScene = false;
+		return;
+	}
+	
+	TArray<AReadyOrNotCharacter*> PlayersOnTeam = GetAvaliablePlayersForTeamView(bIncludeDeadViews);
+    
+	if (PlayersOnTeam.Num() > 0)
+	{
+		CurrentTeamViewIndex++;
+		
+		if (PlayersOnTeam.IsValidIndex(CurrentTeamViewIndex))
+		{
+			CurrentViewCharacter = PlayersOnTeam[CurrentTeamViewIndex];
+		}
+		else
+		{
+			CurrentTeamViewIndex = 0;
+			CurrentViewCharacter = PlayersOnTeam[0];
+		}
+
+		if (PlayerViewActor && CurrentViewCharacter)
+		{
+			PlayerViewActor->ClearHiddenComponents();
+			PlayerViewActor->HideComponent(GetMesh1P());
+			//PlayerViewActor->HideComponent(CurrentViewCharacter->GetFaceMesh());
+			//PlayerViewActor->HideActor(CurrentViewCharacter->GetInventoryComponent()->GetInventoryItemOfType(EItemCategory::IC_NVG));
+			//PlayerViewActor->HideActor(CurrentViewCharacter->GetInventoryComponent()->GetInventoryItemOfType(EItemCategory::IC_Helmet));
+			//PlayerViewActor->HideActor(CurrentViewCharacter->GetInventoryComponent()->GetInventoryItemOfType(EItemCategory::IC_Goggles));
+			//PlayerViewActor->HideActor(CurrentViewCharacter->GetInventoryComponent()->GetInventoryItemOfType(EItemCategory::IC_GasMask));
+
+			PlayerViewActor->SetViewPlayer(CurrentViewCharacter);
+			PlayerViewActor->bShouldCaptureScene = true;
+
+			OnTeamViewSet.Broadcast(CurrentViewCharacter);
+		}
+	}
+	else
+	{
+		CurrentTeamViewIndex = -1;
+		CurrentViewCharacter = nullptr;
+		PlayerViewActor->SetViewPlayer(nullptr);
+		PlayerViewActor->bShouldCaptureScene = false;
+	}
+
+	if (TeamViewWidget)
+	{
+		TeamViewWidget->OnViewSwitched();
+	}
+}
+
+TArray<AReadyOrNotCharacter*> APlayerCharacter::GetAvaliablePlayersForTeamView(const bool bIncludeDeadViews) const
+{
+	TArray<AReadyOrNotCharacter*> PlayersOnTeam;
+		
+	if (const AReadyOrNotGameState* RONGS = GetWorld()->GetGameState<AReadyOrNotGameState>())
+	{
+		if (RONGS->bPvPMode)
+		{
+			switch (GetTeam())
+			{
+				case ETeamType::TT_NONE:
+					PlayersOnTeam = RONGS->BlueTeamPlayers;
+					PlayersOnTeam += RONGS->RedTeamPlayers;
+				break;
+	    
+				case ETeamType::TT_SERT_RED:
+					PlayersOnTeam = RONGS->RedTeamPlayers;
+				break;
+	    
+				case ETeamType::TT_SERT_BLUE:
+					PlayersOnTeam = RONGS->BlueTeamPlayers;
+				break;
+	    
+				case ETeamType::TT_SUSPECT:
+					PlayersOnTeam = RONGS->RedTeamPlayers;
+				break;
+	    
+				case ETeamType::TT_CIVILIAN:
+					PlayersOnTeam = RONGS->BlueTeamPlayers;
+				break;
+	    
+				case ETeamType::TT_SQUAD:
+					PlayersOnTeam = RONGS->BlueTeamPlayers;
+					PlayersOnTeam += RONGS->RedTeamPlayers;
+				break;
+	    
+				default:
+					PlayersOnTeam = RONGS->BlueTeamPlayers;
+					PlayersOnTeam += RONGS->RedTeamPlayers;
+				break;
+			}
+		}
+		else
+		{
+			PlayersOnTeam = TArray<AReadyOrNotCharacter*>(UReadyOrNotFunctionLibrary::GetActorsOfClass<ASWATCharacter>(GetWorld()));
+			for (TActorIterator<APlayerCharacter>It(GetWorld()); It; ++It)
+			{
+				if (*It != this)
+				{
+					PlayersOnTeam.Add(*It);
+				}
+			}
+		}
+	}
+
+	// Filter list
+	PlayersOnTeam.Remove(nullptr);
+	PlayersOnTeam.RemoveAll([&](AReadyOrNotCharacter* Element)
+	{
+		return Element == this || Cast<ATrailerSWATCharacter>(Element);
+	});
+	
+	if (!bIncludeDeadViews)
+	{
+		PlayersOnTeam.RemoveAll([](const AReadyOrNotCharacter* PC)
+	    {
+	        return PC->IsDeadOrUnconscious();
+	    });
+	}
+
+	return PlayersOnTeam;
+}
+
+void APlayerCharacter::CaptureFPCamera(const float DeltaTime)
+{
+	if (IsDeadOrUnconscious())
+	{
+		DestroyPlayerViewActor();
+	}
+	else
+	{
+		if (PlayerViewActor && CurrentViewCharacter)
+		{
+			PlayerViewActor->bShouldCaptureScene = true;
+
+			PlayerViewActor->AttachToComponent(CurrentViewCharacter->GetTeamViewTarget(), FAttachmentTransformRules::SnapToTargetNotIncludingScale, "HeadCamSocket");
+			PlayerViewActor->UpdateViewTarget(CurrentViewCharacter->GetTeamViewTarget()->GetSocketLocation("HeadCamSocket"), CurrentViewCharacter->GetFaceMesh()->GetSocketRotation("HeadCamSocket"));
+		}
+	}
+}
+
+void APlayerCharacter::Server_PlayPVPSpeech_Implementation(const FString& SpeechRowName, ETeamType TeamType)
+{
+	Multicast_PlayPVPSpeech(SpeechRowName, TeamType);
+}
+
+bool APlayerCharacter::Server_PlayPVPSpeech_Validate(const FString& SpeechRowName, ETeamType TeamType)
+{
+	return true;
+}
+
+void APlayerCharacter::Multicast_PlayPVPSpeech_Implementation(const FString& SpeechRowName, ETeamType TeamType)
+{
+	// Note: Disabled till working on pvp again
+	
+	// can't cough while stunned with gas
+	//if (IsStunnedWith(EStunType::ST_Gassed) || IsStunnedWith(EStunType::ST_Peppersprayed) || IsDeadOrUnconscious())
+	//	return;
+	//
+	//AReadyOrNotPlayerController* pc = UBpGameplayHelperLib::GetLocalPlayerController(GetWorld());
+	//if (pc)
+	//{
+	//	if (pc->GetRoNPlayerState())
+	//	{
+	//		if (pc->GetRoNPlayerState()->GetTeam() != TeamType && TeamType != ETeamType::TT_NONE)
+	//		{
+	//			return;
+	//		}
+	//	}
+	//	UDataTable* dt = UBpGameplayHelperLib::GetSpeechLookupDataTable(PVPSpeakerName);
+	//	if (dt)
+	//	{
+	//		FSpeechLookupTable* LookupRow = dt->FindRow<FSpeechLookupTable>(*SpeechRowName, "Speech Lookup");
+	//		if (LookupRow)
+	//		{
+	//			if (LookupRow->Lines.Num() > 0)
+	//			{
+	//				UCharacterSpeechData::PlaySpecificSpeech(this, LookupRow->Lines[FMath::RandRange(0, LookupRow->Lines.Num() -1)]);
+	//			}
+	//
+	//		}
+	//	}
+	//}
+}
+
+float APlayerCharacter::GetViewPitch() const
+{
+	if (Controller)
+	{
+		return Controller->GetControlRotation().Pitch;
+	}
+
+	return RemoteViewPitch / 255.f * 360.f;
+}
+
+FRotator APlayerCharacter::GetAimOffsets() const
+{
+	const FVector AimDirWS = GetBaseAimRotation().Vector();
+	const FVector AimDirLS = ActorToWorld().InverseTransformVectorNoScale(AimDirWS);
+	const FRotator AimRotLS = AimDirLS.Rotation();
+
+	return AimRotLS;
+}
+
+// addition for locomotion
+void APlayerCharacter::CalcStop(float DeltaSeconds)
+{
+	const float SpeedHorizontal = FVector2D(GetVelocity().X, GetVelocity().Y).Size();
+
+	// run this only on the server
+	if (GetLocalRole() == ROLE_Authority)
+	{
+		// addition for strafe poses
+		if (GetCharacterMovement()->IsWalking())
+		{
+			// set stop
+			if (GetVelocity().Size2D() != 0 && GetCharacterMovement()->GetCurrentAcceleration().Size2D() == 0)
+			{
+				bIsStopping = true;
+			}
+
+			// reset stop once speed is zero
+			if (bIsStopping)
+			{
+				// wait until speed is zero
+				if (SpeedHorizontal <= 0.0)
+				{
+					bIsStopping = false;
+				}
+
+				// early out if we start moving
+				if (GetCharacterMovement()->GetCurrentAcceleration().Size2D() != 0)
+				{
+					bIsStopping = false;
+				}
+			}
+		}
+	}
+}
+
+UAnimMontage* APlayerCharacter::GetCurrentFPMontage()
+{
+	if (const UAnimInstance* AnimInstance = Mesh1P->GetAnimInstance())
+	{
+		return AnimInstance->GetCurrentActiveMontage();
+	}
+	
+	return nullptr;
+}
+
+void APlayerCharacter::EnableNightVisionGoggles()
+{
+	if (ANightvisionGoggles* NVG = Cast<ANightvisionGoggles>(GetInventoryComponent()->GetInventoryItemOfClass(ANightvisionGoggles::StaticClass())))
+	{
+		Server_RepNVGOn(true);
+		bNVGOn = true;
+		NVG->SpawnNightvisionWidget();
+		NVG->UpdateNVGPostProcess();
+		NVG->SetNightvisionGlobalMaterialParameters(true);
+
+		FWeightedBlendables CurrentActiveBlendables = PlayerPostProcessingComp->Settings.WeightedBlendables;
+		PlayerPostProcessingComp->Settings = NVG->NightVisionPostProcess;
+		PlayerPostProcessingComp->Settings.WeightedBlendables = CurrentActiveBlendables;
+		GetController<AReadyOrNotPlayerController>()->ConsoleCommand("r.VolumetricFog 0");
+	}
+}
+
+void APlayerCharacter::DisableNightVisionGoggles()
+{
+	ANightvisionGoggles* NVG = Cast<ANightvisionGoggles>(GetInventoryComponent()->GetInventoryItemOfClass(ANightvisionGoggles::StaticClass()));
+	if (NVG)
+	{
+		Server_RepNVGOn(false);
+		bNVGOn = false;
+		NVG->DestroyNightvisionWidget();
+		NVG->UpdateNVGPostProcess();
+		NVG->SetNightvisionGlobalMaterialParameters(false);
+		
+		GetController<AReadyOrNotPlayerController>()->ConsoleCommand("r.VolumetricFog 1");
+		//FirstPersonCameraComponent->AddOrUpdateBlendable(NVG->NightVisionPostProcess, 0.0f);
+		//FirstPersonCameraComponent->PostProcessSettings = DefaultPostProcessSettings;
+	}
+}
+
+void APlayerCharacter::OnItemSelectionStyleChanged_Implementation(EItemSelectionInterfaceType NewItemSelectionInterface)
+{
+}
+
+void APlayerCharacter::Multicast_HideThirdPerson_Implementation()
+{
+	//GetMesh()->bOnlyOwnerSee = true;
+	GetMesh1P()->SetVisibility(true);
+	GetMesh()->SetVisibility(false);
+	GetFaceMesh()->SetVisibility(false);
+}
+
+void APlayerCharacter::Multicast_ShowThirdPerson_Implementation()
+{
+	//GetMesh()->bOnlyOwnerSee = false;
+	GetMesh1P()->SetVisibility(false);
+	GetMesh()->SetVisibility(CustomizationSkeletalMeshes.Num() <= 0);
+	GetFaceMesh()->SetVisibility(CustomizationSkeletalMeshes.Num() <= 0);
+}
+
+void APlayerCharacter::SetForceLowReady(bool bShouldForceLowReady)
+{
+	if (!bShouldForceLowReady && bForceLowReady)
+	{
+		SetLowReady(false, false);
+	}
+	bForceLowReady = bShouldForceLowReady;
+}
+
+void APlayerCharacter::OnChatPressed_Implementation()
+{
+	UReadyOrNotGameUserSettings* us = Cast<UReadyOrNotGameUserSettings>(GEngine->GetGameUserSettings());
+	if (us)
+	{
+		if (!us->bShowChat)
+		{
+			return;
+		}
+	}
+
+	if (HumanCharacterWidget_V2)
+	{
+		HumanCharacterWidget_V2->ChatPressed();
+	}
+}
+
+void APlayerCharacter::OnTeamChatPressed_Implementation()
+{
+	UReadyOrNotGameUserSettings* us = Cast<UReadyOrNotGameUserSettings>(GEngine->GetGameUserSettings());
+	if (us)
+	{
+		if (!us->bShowChat)
+		{
+			return;
+		}
+	}
+		
+	if (HumanCharacterWidget_V2)
+	{
+		HumanCharacterWidget_V2->TeamChatPressed();
+	}
+}
+
+void APlayerCharacter::FireLaserEyes()
+{
+	#if !UE_BUILD_SHIPPING
+	if (CHECK_DEBUG_SUBSYSTEM && DEBUG_SUBSYSTEM->bLaserEyes)
+	{
+		const FHitResult Hit = GetHitFromCamera(100000.0f, {ECC_Visibility, ECC_WorldStatic, ECC_WorldDynamic, ECC_Pawn, ECC_DOOR, ECC_DOORWAY, ECC_ITEM}, FRotator::ZeroRotator, FVector::ZeroVector, true);
+		if (Hit.bBlockingHit)
+		{
+			if (AActor* Actor = Hit.GetActor())
+			{
+				Actor->Destroy(true);
+			}
+		}
+	}
+	#endif
+}
+
+void APlayerCharacter::DrawPermanentMarker()
+{
+	#if !UE_BUILD_SHIPPING
+	if (APlayerCameraManager* CameraManager = UGameplayStatics::GetPlayerCameraManager(this, 0))
+	{
+		FVector CameraLocation;
+		FRotator CameraRotation;
+		CameraManager->GetCameraViewPoint(CameraLocation, CameraRotation);
+			
+		const FVector SpawnLoc = CameraLocation + (CameraRotation.Vector() * 10000.0f);
+
+		FHitResult HitResult;
+		FCollisionQueryParams CollisionQueryParams;
+		CollisionQueryParams.AddIgnoredActor(this);
+						
+		FCollisionObjectQueryParams CollisionObjectQueryParams;
+		CollisionObjectQueryParams.AddObjectTypesToQuery(ECC_WorldStatic);
+		CollisionObjectQueryParams.AddObjectTypesToQuery(ECC_DOOR);
+		CollisionObjectQueryParams.AddObjectTypesToQuery(ECC_DOORWAY);
+
+		if (GetWorld()->LineTraceSingleByObjectType(HitResult, CameraLocation, SpawnLoc, CollisionObjectQueryParams))
+		{
+			const FVector Location = HitResult.Location + HitResult.ImpactNormal * 50.0f;
+			DrawDebugBox(GetWorld(), Location, FVector(15.0f), FColor::Cyan, true);
+		}
+	}
+	#endif
+}
+
+void APlayerCharacter::SetHumanCharacterWidget_V2(UHumanCharacterHUD_V2* NewHumanCharacterWidget)
+{
+	HumanCharacterWidget_V2 = NewHumanCharacterWidget;
+}
+
+void APlayerCharacter::ToggleHUD()
+{
+	if (HumanCharacterWidget_V2)
+	{
+		bool bShowHUD = false;
+		UBpGameplayHelperLib::LoadShowHUDSetting(bShowHUD);
+		UBpGameplayHelperLib::SaveShowHUDSetting(!bShowHUD);
+
+		HumanCharacterWidget_V2->SetVisibility(!bShowHUD ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Hidden);
+	}
+}
+
+void APlayerCharacter::Server_ToggleLightByClass_Implementation(const ELightRadialSelection LightType)
+{
+	if (IsStunned() || IsArrested() || IsDeadOrUnconscious())
+	{
+		return;
+	}
+
+	switch (LightType)
+	{
+		case ELightRadialSelection::LR_NVGs:
+			ToggleNightvisionGoggles();
+		break;
+			
+		case ELightRadialSelection::LR_Chemlight:
+		break;
+			
+		case ELightRadialSelection::LR_WeaponLight:
+			Multicast_ToggleLaserLight();
+		break;
+			
+		case ELightRadialSelection::LR_None:
+		break;
+
+		default:
+		break;
+	}
+}
+
+/*
+
+// predict the future trajectory based on movement and speed
+void APlayerCharacter::CalcFutureTrajectory(float DeltaTime)
+{
+	FTransform WorldTransformCapsule = GetCapsuleComponent()->GetComponentTransform();
+
+	// edit to be slightly above ground level
+	FVector EditedCapsuleLocation = FVector(WorldTransformCapsule.GetLocation().X, WorldTransformCapsule.GetLocation().Y, 30.0f);
+	WorldTransformCapsule.SetLocation(EditedCapsuleLocation);
+
+	FTransform DesiredTransform;
+
+	// for AI you will set a desired speed to make them move
+	float DesiredSpeed = 300.0f;
+
+	VelocityLocal = UKismetMathLibrary::InverseTransformDirection(GetActorTransform(), GetVelocity());
+
+	// use velocity as speed input
+
+	float SpeedForward = VelocityLocal.X < 0.0f ? -FVector2D(0.0f, VelocityLocal.X).Size() : FVector2D(0.0f, VelocityLocal.X).Size();
+	float SpeedRight = VelocityLocal.Y < 0.0f ? -FVector2D(0.0f, VelocityLocal.Y).Size() : FVector2D(0.0f, VelocityLocal.Y).Size();
+	//SpeedVertical = Velocity.Z;
+
+
+	// calculate required elements for goal
+	FRotator ControlRotYawOnly = FRotator(0.0f, GetControlRotation().Yaw, 0.0f);
+
+	FVector RightDesire = UKismetMathLibrary::Multiply_VectorFloat(UKismetMathLibrary::GetRightVector(ControlRotYawOnly), SpeedRight);
+	FVector ForwardDesire = UKismetMathLibrary::Multiply_VectorFloat(UKismetMathLibrary::GetForwardVector(ControlRotYawOnly), SpeedForward);
+
+	FVector TotalDesire = ForwardDesire + RightDesire;
+	FRotator DesiredRotation = UKismetMathLibrary::Conv_VectorToRotator(ForwardDesire + RightDesire);
+
+	// apply desire to transform
+	DesiredTransform.SetLocation(WorldTransformCapsule.GetLocation() + TotalDesire);
+	DesiredTransform.SetRotation(WorldTransformCapsule.GetRotation());
+	DesiredTransform.SetScale3D(WorldTransformCapsule.GetScale3D());
+
+	UMyBlueprintFunctionLibrary::BuildGoal(FutureTrajectory, DesiredTransform, DesiredSpeed, WorldTransformCapsule);
+	FVector EndPos = UKismetMathLibrary::ComposeTransforms(FutureTrajectory.TrajectoryPoints.Last().m_TM, WorldTransformCapsule).GetLocation();
+
+	YawDelta = (DesiredRotation.Yaw - LastYawCache) / (DeltaTime * 4.0f);
+	float ClampedYawDelta = FMath::Clamp(YawDelta, -45.0f, 45.0f);
+	YawDeltaSmoothed = FMath::FInterpTo(YawDeltaSmoothed, ClampedYawDelta, DeltaTime, 7.0f);
+
+	// draw Cyan for angular change
+	DrawDebugDirectionalArrow(GetWorld(), WorldTransformCapsule.GetLocation(), EndPos, 16.0f, FColor::Green, false, 0.0f, 0.0f, 1.5f);
+	DrawDebugDirectionalArrow(GetWorld(), WorldTransformCapsule.GetLocation(), WorldTransformCapsule.GetLocation() + TotalDesire.RotateAngleAxis(YawDeltaSmoothed, FVector(0, 0, 1)), 16.0f, FColor::Cyan, false, 0.0f, 0.0f, 1.5f);
+
+	// draw arc path, only visually debug right now but force push back into trajectory path in future!
+	FVector PrevPoint = WorldTransformCapsule.GetLocation();
+	float CachedRot = 0.0f;
+
+	for (int32 i = 0; i < FutureTrajectory.TrajectoryPoints.Num(); i++)
+	{
+		FTransform EditedTransform;
+
+		// calculate rotation spread evenly across all trajectory points
+		float CurRot = YawDeltaSmoothed / FutureTrajectory.TrajectoryPoints.Num();
+		FVector RotatedPoint = FutureTrajectory.TrajectoryPoints[i].m_TM.GetLocation().RotateAngleAxis(CurRot + CachedRot, FVector(0, 0, 1));
+
+		EditedTransform.SetLocation(RotatedPoint);
+		EditedTransform.SetRotation(FutureTrajectory.TrajectoryPoints[i].m_TM.GetRotation());
+
+		DrawDebugDirectionalArrow(GetWorld(), PrevPoint, UKismetMathLibrary::ComposeTransforms(EditedTransform, WorldTransformCapsule).GetLocation(), 16.0f, FColor::Yellow, false, 0.0f, 0.0f, 1.5f);
+		PrevPoint = UKismetMathLibrary::ComposeTransforms(EditedTransform, WorldTransformCapsule).GetLocation();
+
+		CachedRot += CurRot;
+	}
+
+	// print past path
+	DrawDebugLine(GetWorld(), LastPath, WorldTransformCapsule.GetLocation(), FColor::Red, false, 1.0f, 0.0f, 1.5f);
+
+	// update last path
+	LastPath = WorldTransformCapsule.GetLocation();
+
+	// update last yaw cache
+	LastYawCache = DesiredRotation.Yaw;
+}
+
+*/
+
+FVector APlayerCharacter::GetRefBoneLocalLocation(const USkeletalMeshComponent* TargetMesh, const FName& BoneName) const
+{
+	FVector Result = { 0.0f, 0.0f, 0.0f };
+
+	const FReferenceSkeleton& RefSkeleton = TargetMesh->SkeletalMesh->GetRefSkeleton();
+
+	int32 BoneIndex = RefSkeleton.FindBoneIndex(BoneName);
+	int32 ParentIndex = -1;
+
+	while (ParentIndex != 0 && BoneIndex != -1)
+	{
+		const FTransform& Transform = RefSkeleton.GetRefBonePose()[BoneIndex];
+
+		Result = Transform.GetRotation().RotateVector(Result);
+		Result += Transform.GetTranslation();
+
+		ParentIndex = RefSkeleton.GetRefBoneInfo()[BoneIndex].ParentIndex;
+		BoneIndex = ParentIndex;
+	}
+
+	return Result;
+}
+
+bool APlayerCharacter::IsMoving() const
+{
+	return GetVelocity().Size() > VelocityThreshold;
+}
+
+bool APlayerCharacter::IsMovingForward() const
+{
+	return IsMoving() && FVector::DotProduct(GetActorForwardVector(), GetVelocity().GetSafeNormal()) > 0.001f;
+}
+
+void APlayerCharacter::ToggleSightTweaker()
+{
+	AReadyOrNotPlayerController* RoNController = Cast<AReadyOrNotPlayerController>(GetController());
+	if (RoNController)
+	{
+		if (SightTweakerWidgetTemplate)
+		{
+			bool bRemovedAnyWidgets = false;
+
+			for (TObjectIterator<UUserWidget> Itr; Itr; ++Itr)
+			{
+				UUserWidget* LiveWidget = *Itr;
+
+				/* If the Widget has no World, Ignore it (It's probably in the Content Browser!) */
+				if (!LiveWidget->GetWorld() || LiveWidget->GetWorld() != GetWorld())
+				{
+					continue;
+				}
+
+				if (LiveWidget->GetClass() == SightTweakerWidgetTemplate)
+				{
+					if (LiveWidget->IsInViewport())
+					{
+						bIsSightTweakMode = false;
+						FInputModeGameOnly InputMode;
+						RoNController->bShowMouseCursor = false;
+						RoNController->SetInputMode(InputMode);
+
+						bRemovedAnyWidgets = true;
+						LiveWidget->RemoveFromParent();
+					}
+					LiveWidget = nullptr;
+				}
+
+
+			}
+
+			if (!bRemovedAnyWidgets)
+			{
+				UUserWidget* Widget = CreateWidget<UUserWidget>(GetWorld(), SightTweakerWidgetTemplate);
+
+				if (Widget)
+				{
+					// push back current values from weapon bp
+					FTransform DefaultMeshspaceTransform, AimingMeshspaceTransform, BackMeshspaceTransform;
+					GetEquippedItem()->GetMeshspaceTransform(DefaultMeshspaceTransform, AimingMeshspaceTransform, BackMeshspaceTransform);
+
+					SightTweakerPosOffset = AimingMeshspaceTransform.GetLocation();
+					SightTweakerRotOffset = AimingMeshspaceTransform.GetRotation().Rotator();
+
+
+					Widget->SetVisibility(ESlateVisibility::Visible);
+
+					bool bLockMouseToViewport = true;
+					FInputModeUIOnly InputMode;
+					InputMode.SetLockMouseToViewportBehavior(bLockMouseToViewport ? EMouseLockMode::LockAlways : EMouseLockMode::DoNotLock);
+					InputMode.SetWidgetToFocus(Widget->TakeWidget());
+
+
+					RoNController->SetInputMode(InputMode);
+					RoNController->bShowMouseCursor = true;
+					bIsSightTweakMode = true;
+
+					Widget->AddToViewport();
+				}
+			}
+		}
+	}
+}
+
+void APlayerCharacter::ForceMaxLODs_Items()
+{
+	TArray<AActor*> OutActors;
+	UGameplayStatics::GetAllActorsOfClass(GetWorld(), APlayerCharacter::StaticClass(), OutActors);
+	for (AActor* actor : OutActors)
+	{
+		APlayerCharacter* pc = Cast<APlayerCharacter>(actor);
+		if (!pc)
+			continue;
+
+		for (AActor* i : pc->GetInventoryComponent()->GetInventoryItems())
+		{
+			ABaseItem* bi = Cast<ABaseItem>(i);
+			if (!bi)
+				continue;
+
+			bi->GetItemMesh()->bOverrideMinLod = true;
+			bi->GetItemMesh()->SetMinLOD(bi->GetItemMesh()->GetNumLODs() - 1);
+		}
+	}
+}
+
+void APlayerCharacter::ResetLODs_Items()
+{
+	TArray<AActor*> OutActors;
+	UGameplayStatics::GetAllActorsOfClass(GetWorld(), APlayerCharacter::StaticClass(), OutActors);
+	for (AActor* actor : OutActors)
+	{
+		APlayerCharacter* pc = Cast<APlayerCharacter>(actor);
+		if (!pc)
+			continue;
+
+		for (AActor* i : pc->GetInventoryComponent()->GetInventoryItems())
+		{
+			ABaseItem* bi = Cast<ABaseItem>(i);
+			if (!bi)
+				continue;
+
+			bi->GetItemMesh()->bOverrideMinLod = false;
+			bi->GetItemMesh()->SetMinLOD(0);
+		}
+	}
+}
+
+void APlayerCharacter::ForceMaxLODs_Player()
+{
+	TArray<AActor*> OutActors;
+	UGameplayStatics::GetAllActorsOfClass(GetWorld(), APlayerCharacter::StaticClass(), OutActors);
+	for (AActor* actor : OutActors)
+	{
+		APlayerCharacter* pc = Cast<APlayerCharacter>(actor);
+		if (!pc)
+			continue;
+
+		pc->GetMesh()->bOverrideMinLod = true;
+		pc->GetMesh1P()->bOverrideMinLod = true;
+		pc->GetMesh()->SetMinLOD(pc->GetMesh()->GetNumLODs() - 1);
+		pc->GetMesh1P()->SetMinLOD(pc->GetMesh1P()->GetNumLODs() - 1);
+	}
+}
+
+void APlayerCharacter::ResetLODS_Player()
+{
+	TArray<AActor*> OutActors;
+	UGameplayStatics::GetAllActorsOfClass(GetWorld(), StaticClass(), OutActors);
+	for (AActor* actor : OutActors)
+	{
+		APlayerCharacter* pc = Cast<APlayerCharacter>(actor);
+		if (!pc)
+			continue;
+
+		pc->GetMesh()->bOverrideMinLod = false;
+		pc->GetMesh1P()->bOverrideMinLod = false;
+		pc->GetMesh()->SetMinLOD(0);
+		pc->GetMesh1P()->SetMinLOD(0);
+	}
+}
+
+void APlayerCharacter::CalculateMeshRot(float DeltaTime)
+{
+	if (bIgnoreRotationOverride || !GetMesh() || !GetMesh()->GetAnimInstance())
+	{
+		return;
+	}
+
+	// check global weight on interactions
+	// we don't want to lock the character on interactions
+	const bool bPlayingInteraction = GetMesh()->GetAnimInstance()->GetSlotMontageGlobalWeight(FName("Interaction")) > 0.0f ? true : false;
+
+	if ((!bIsStopping && (GetVelocity().Size2D() != 0 || GetCharacterMovement()->IsFalling())) || bPlayingInteraction)
+	{
+		CurrentMeshRot = FMath::RInterpTo(CurrentMeshRot, FRotator(0, GetActorRotation().Yaw, 0), DeltaTime, 8.0f);
+	}
+
+	GetMesh()->SetWorldRotation(UKismetMathLibrary::ComposeRotators(CurrentMeshRot, FRotator(0, -90.0f, 0)), false, nullptr, ETeleportType::None);
+	MeshBody1P->SetWorldRotation(UKismetMathLibrary::ComposeRotators(CurrentMeshRot, FRotator(0, -90.0f, 0)), false, nullptr, ETeleportType::None);
+}
+
+void APlayerCharacter::AddControllerPitchInput(float Val)
+{
+	#if WITH_EDITOR
+	if (ThirdPersonFreeLook)
+	{
+		ThirdPersonCameraArm->AddRelativeRotation(FRotator(-Val, 0.0f, 0.0f));
+	}
+	else
+	#endif
+	{
+		Super::AddControllerPitchInput(Val);
+	}
+}
+
+void APlayerCharacter::AddControllerYawInput(float Val)
+{
+	#if WITH_EDITOR
+	if (ThirdPersonFreeLook)
+	{
+		ThirdPersonCameraArm->AddRelativeRotation(FRotator(0.0f, Val, 0.0f));
+	}
+	else
+	#endif
+	{
+		Super::AddControllerYawInput(Val);
+	}
+}
+
+void APlayerCharacter::Server_InstantSurrenderTarget_Implementation()
+{
+	TArray<FHitResult> Hits;
+	FCollisionQueryParams QueryParams = FCollisionQueryParams::DefaultQueryParam;
+
+	QueryParams.AddIgnoredActor(this);
+
+	const FVector Start = FirstPersonCameraComponent->GetComponentLocation();
+	const FVector End = Start + (FirstPersonCameraComponent->GetForwardVector() * 10000.0f);
+
+	if (GetWorld()->LineTraceMultiByChannel(Hits, Start, End, ECC_Pawn, QueryParams))
+	{
+		for (int32 i = 0; i < Hits.Num(); i++)
+		{
+			ACyberneticCharacter* CharacterHit = Cast<ACyberneticCharacter>(Hits[i].GetActor());
+			if (!CharacterHit)
+			{
+				continue;
+			}
+
+			if (CharacterHit->GetTeam() != ETeamType::TT_CIVILIAN && CharacterHit->GetTeam() != ETeamType::TT_SUSPECT)
+			{
+				continue;
+			}
+
+			CharacterHit->Surrender();
+		}
+	}
+}
+
+void APlayerCharacter::JamDoor(ADoor* Door)
+{
+	if (ADoorJam* DoorJam = GetEquippedItem<ADoorJam>())
+	{
+		DoorJam->JamDoor(Door);
+	}
+}
+
+void APlayerCharacter::C2Door(ADoor* Door)
+{
+	if (AC2Explosive* C2 = GetEquippedItem<AC2Explosive>())
+	{
+		C2->Server_StartC2Placement(Door);
+	}
+}
+
+bool APlayerCharacter::HasC2()
+{
+	return GetInventoryComponent()->GetInventoryItemOfType(EItemCategory::IC_C2Explosive) != nullptr;
+}
+
+bool APlayerCharacter::HasBSG()
+{
+	return GetInventoryComponent()->GetInventoryItemOfType(EItemCategory::IC_BreachingShotgun) != nullptr;
+}
+
+bool APlayerCharacter::HasOptiwand()
+{
+	return GetInventoryComponent()->GetInventoryItemOfType(EItemCategory::IC_Optiwand) != nullptr;
+}
+
+bool APlayerCharacter::HasWedge()
+{
+	return GetInventoryComponent()->GetInventoryItemOfType(EItemCategory::IC_Doorjam) != nullptr;
+}
+
+bool APlayerCharacter::HasLockpick()
+{
+	return GetInventoryComponent()->GetInventoryItemOfType(EItemCategory::IC_Multitool) != nullptr;
+}
+
+bool APlayerCharacter::HasNVG()
+{
+	return GetInventoryComponent()->GetInventoryItemOfType(EItemCategory::IC_NVG) != nullptr;
+}
+
+float APlayerCharacter::GetMultitoolUseTime_Implementation()
+{
+	return 5.0f;
+}
+
+EMultitoolFunctions APlayerCharacter::GetMultitoolUseType_Implementation()
+{
+	return EMultitoolFunctions::MF_Knife;
+}
+
+bool APlayerCharacter::CanUseMultitoolNow_Implementation(class AReadyOrNotCharacter* ToolOwner, class AMultitool* Tool, FHitResult TraceHit)
+{
+	if (!ToolOwner)
+	{
+		return false;	// not allowed if the tool owner is invalid
+	}
+
+	if (!IsArrested())
+	{
+		return false;	// not allowed if the tool is invalid
+	}
+
+	if (IsDeadOrUnconscious())
+	{
+		return false;	// too sandboxy for my tastes. this would cause numerous problems --eez
+	}
+
+	switch (GetTeam())
+	{
+		case ETeamType::TT_CIVILIAN:
+		case ETeamType::TT_SUSPECT:
+		return true; // Civilians and suspects can be freed.
+		case ETeamType::TT_SQUAD:
+		case ETeamType::TT_NONE:
+		case ETeamType::TT_SERT_BLUE:
+		case ETeamType::TT_SERT_RED:	
+		return UBpGameplayHelperLib::IsFriendly(GetWorld()->GetGameState<AReadyOrNotGameState>(), ToolOwner->GetTeam(), GetTeam());
+		default:
+		return false;
+	}
+}
+
+bool APlayerCharacter::CanQuickThrow()
+{
+	if (!QuickThrowItem)
+	{
+		return false;
+	}
+
+	// Stirls wanted it off
+	// if (IsLowReady())
+	// 	return false;
+	
+	if (IsAnimationBlocking())
+	{
+		return false;
+	}
+
+	if (IsCarried() || IsCarrying())
+		return false;
+
+	// Don't allow quick throw in lobby or when looking at low ready zone
+	if (bForceLowReady || bIsLowReadyFromVolume)
+		return false;
+	
+	EGrenadeThrowSettingType GrenadeType;
+	if (!UBpGameplayHelperLib::LoadGrenadeSettings(GrenadeType) || GrenadeType == EGrenadeThrowSettingType::GUT_ClassicGrenadeThrow)
+	{
+		return false;
+	}
+
+	return true;
+}
+
+void APlayerCharacter::StartQuickThrow()
+{
+	if (IsCarried() || IsCarrying())
+		return;
+	
+	bStartedQuickThrow = CanQuickThrow();
+	
+	if (!bStartedQuickThrow)
+		return;
+
+	if (ABaseGrenade* EquippedGrenade = Cast<ABaseGrenade>(GetEquippedItem()))
+	{
+		QuickThrowItem = EquippedGrenade;
+	}
+	else
+	{
+		QuickThrowItem = Cast<ABaseGrenade>(GetInventoryComponent()->GetInventoryItemOfClass(ABaseGrenade::StaticClass()));
+	}
+	
+	if (QuickThrowItem == GetEquippedItem())
+	{
+		QuickThrowItem->bFastThrowOnceEquipped = true;
+		QuickThrowItem->OnItemPrimaryUse();
+	}
+	else
+	{
+		GetInventoryComponent()->PutItemInHands(QuickThrowItem);
+	}
+
+	OnQuickThrowStart.Broadcast(this, GetEquippedItem(), QuickThrowItem);
+	bQuickThrowing = true;
+	bTryEndQuickThrow = false;
+}
+
+void APlayerCharacter::EndQuickThrow()
+{
+	if (IsCarried() || IsCarrying())
+		return;
+	
+	bStartedQuickThrow = false;
+	EGrenadeThrowSettingType GrenadeType;
+
+	if (!UBpGameplayHelperLib::LoadGrenadeSettings(GrenadeType) || GrenadeType == EGrenadeThrowSettingType::GUT_ClassicGrenadeThrow)
+	{
+		return;
+	}
+
+	bTryEndQuickThrow = true;
+
+	OnQuickThrowEnd.Broadcast(QuickThrowItem);
+}
+
+void APlayerCharacter::DoEndQuickThrow()
+{
+	if (IsCarried() || IsCarrying())
+		return;
+	
+	if (IsLowReady())
+		return;
+	
+	if (QuickThrowItem)
+	{
+		QuickThrowItem->OnItemPrimaryUseEnd();
+	}
+
+	if (!QuickThrowItem || (QuickThrowItem && QuickThrowItem->bUsed))
+	{
+		bQuickThrowing = false;
+	}
+}
+
+void APlayerCharacter::Client_AutoSelectNewQuickthrowItem_Implementation(ABaseGrenade* CallingGrenade)
+{
+	if (CallingGrenade != QuickThrowItem)
+	{
+		// We don't auto-select new grenades unless we're throwing a quick grenade
+		return;
+	}
+
+	// Don't select the same item that we had before
+	for (ABaseItem* item : GetInventoryComponent()->GetInventoryItems())
+	{
+		ABaseGrenade* bg = Cast<ABaseGrenade>(item);
+		if (!bg)
+		{
+			continue;	// not a grenade
+		}
+
+		if (bg == QuickThrowItem)
+		{
+			continue; // is the same as our current item
+		}
+
+		if (!bg->CanEquip(this))
+		{
+			continue; // can't equip it
+		}
+
+		QuickThrowItem = bg;
+		return;
+	}
+
+	QuickThrowItem = nullptr;
+}
+
+void APlayerCharacter::Client_OnPlayerDamage_Implementation(const bool bTakenDamage, const float InDamage, AReadyOrNotCharacter* InstigatorCharacter, AActor* DamageCauser)
+{
+	if (bTakenDamage)
+	{
+		if (!IsDeadOrUnconscious())
+		{
+			OnCharacterTakeDamage.Broadcast(InstigatorCharacter, this, DamageCauser, InDamage, CharacterHealth->GetCurrentResource());
+		}
+	}
+}
+
+FString APlayerCharacter::GetFriendlyName_Implementation()
+{
+	if (GetPlayerState())
+	{
+		return GetPlayerState()->GetPlayerName();
+	}
+	
+	switch (GetTeam())
+	{
+		case ETeamType::TT_NONE:		return "None";
+		case ETeamType::TT_SERT_RED:	return "Red Team";
+		case ETeamType::TT_SERT_BLUE:	return "Blue Team";
+		case ETeamType::TT_SUSPECT:		return "Suspect";
+		case ETeamType::TT_CIVILIAN:	return "Civilian";
+		case ETeamType::TT_SQUAD:		return "Gold";
+		default: return "";
+	}
+}
+
+void APlayerCharacter::TickCameraWeaponBob(float DeltaTime)
+{
+	if (!IsLocalPlayer())
+		return;
+	
+	// get active item to retrieve per item scale and then see about active attachments for another extra factor!
+	if (GetEquippedItem())
+	{
+		float waveslice = 0.0f;
+		float waveslice_cos = 0.0f;
+		float wp_waveslice = 0.0f;
+		float wp_waveslice_cos = 0.0f;
+
+		float wp_rot_waveslice = 0.0f;
+		float wp_rot_waveslice_cos = 0.0f;
+
+		float sprint_scale = 1.0f;
+
+		// get base factor from gun
+		const float CamBobSclH = GetEquippedItem()->CameraBobScaleH;
+		const float CamBobSclV = GetEquippedItem()->CameraBobScaleV;
+		const float CamBobSpeedScaleV = GetEquippedItem()->CameraBobSpeedScaleV;
+		const float CamBobSpeedScaleH = GetEquippedItem()->CameraBobSpeedScaleH;
+		
+		// wp bob entries
+		const float WpBobInjuredScale = GetEquippedItem()->WeaponBobScaleInjured;
+		const float WpBobScaleV = GetEquippedItem()->WeaponBobScaleV;
+		const float WpBobScaleH = GetEquippedItem()->WeaponBobScaleH;
+		const float WpBobSpeedInjuredScale = GetEquippedItem()->WeaponBobSpeedScaleInjured;
+		const float WpBobAmplitudeScaleV = GetEquippedItem()->WeaponBobSpeedScaleV;
+		const float WpBobAmplitudeScaleH = GetEquippedItem()->WeaponBobSpeedScaleH;
+		//float WpBobAmplitudeWalkScale = 0.5;
+
+		const float WpBobCrouchModifier = GetEquippedItem()->WeaponBobCrouchModifier;
+		const float WpBobADSModifier = GetEquippedItem()->WeaponBobADSModifier;
+
+		// wp bob rotation entries
+		const float WpBobRotPitchScale = GetEquippedItem()->WeaponBobRotPitchScale;
+		const float WpBobRotRollScale = GetEquippedItem()->WeaponBobRotRollScale;
+		const float WpBobRotPitchSpeed = GetEquippedItem()->WeaponBobRotPitchSpeed;
+		const float WpBobRotRollSpeed = GetEquippedItem()->WeaponBobRotRollSpeed;
+		const float WpBobRotCrouchModifier = GetEquippedItem()->WeaponBobRotCrouchModifier;
+		const float WpBobRotADSModifier = GetEquippedItem()->WeaponBobRotADSModifier;
+
+		/* TODO move to gun to optimize speed!
+		// get active attachments weight addition to sum up
+		TArray<UWeaponAttachment*> weaponAttachments;
+		GetEquippedItem()->GetComponents(weaponAttachments);
+		for (int32 i = 0; i < weaponAttachments.Num(); i++)
+		{
+			UWeaponAttachment* attachment = Cast<UWeaponAttachment>(weaponAttachments[i]);
+			if (attachment)
+			{
+				CamBobSclAttachment += attachment->CameraBobAdditionFactor;
+			}
+		}
+		*/
+
+		const bool bIsInjured = GetHealthComponent()->GetCurrentResource() < 50.0f;
+
+		const float ForwardInput = GetCharacterMovement()->GetLastInputVector().X;
+		const float RightInput = GetCharacterMovement()->GetLastInputVector().Y;
+		if (FMath::Abs(ForwardInput) == 0 && FMath::Abs(RightInput) == 0)
+		{
+			CameraBobTimer = 0.0f;
+			WeaponBobTimer = 0.0f;
+		}
+		else
+		{
+			float base_amplitude_speed = 1.0f;
+			CameraBobTimer += DeltaTime * (/*0.3f + 0.7f **/ GetVelocity().Size2D() / (!bIsCrouched ? GetCharacterMovement()->MaxWalkSpeed : GetCharacterMovement()->MaxWalkSpeedCrouched));
+			WeaponBobTimer += DeltaTime * (GetVelocity().Size2D() / (!bIsCrouched ? GetCharacterMovement()->MaxWalkSpeed : GetCharacterMovement()->MaxWalkSpeedCrouched));
+
+			if(FMath::Abs(GetVelocity().Size2D()) <= 120.f)
+				base_amplitude_speed *= GetEquippedItem()->CameraBobAmplitudeWalkScale;
+
+			if (FMath::Abs(GetVelocity().Size2D()) >= 350.f)
+			{
+				sprint_scale *= GetEquippedItem()->CameraBobIntensitySprintScale;
+				base_amplitude_speed *= GetEquippedItem()->CameraBobAmplitudeSprintScale;
+			}
+
+			waveslice = FMath::Sin( 8 * CameraBobTimer * (base_amplitude_speed * CamBobSpeedScaleV));
+			waveslice_cos = FMath::Cos( 8 * CameraBobTimer * (base_amplitude_speed * CamBobSpeedScaleH));
+
+			wp_waveslice = FMath::Sin(8 * WeaponBobTimer * (base_amplitude_speed * WpBobAmplitudeScaleV) * (bIsInjured ? WpBobSpeedInjuredScale : 1.0f) );
+			wp_waveslice_cos = FMath::Cos(8 * WeaponBobTimer * (base_amplitude_speed * WpBobAmplitudeScaleH) * (bIsInjured ? WpBobSpeedInjuredScale : 1.0f) );
+
+			// for rotation
+			wp_rot_waveslice = FMath::Sin(8 * WeaponBobTimer * (base_amplitude_speed * WpBobRotPitchSpeed) * (bIsInjured ? WpBobSpeedInjuredScale : 1.0f));
+			wp_rot_waveslice_cos = FMath::Cos(8 * WeaponBobTimer * (base_amplitude_speed * WpBobRotRollSpeed) * (bIsInjured ? WpBobSpeedInjuredScale : 1.0f));
+		}
+
+		if (/*waveslice != 0 && */ FMath::Abs(GetVelocity().Size2D()) >= 30.0f)
+		{
+			constexpr float CamBobSclAttachment = 1.0f;
+			const float BobbingHCur = waveslice_cos * -1.0f * sprint_scale * CamBobSclH * CamBobSclAttachment;
+			const float BobbingVCur = waveslice * CamBobSclV * sprint_scale * CamBobSclAttachment;
+
+			CameraBobTrans.X = FMath::FInterpTo(CameraBobTrans.X, BobbingHCur, DeltaTime, 14.0f);
+			CameraBobTrans.Z = FMath::FInterpTo(CameraBobTrans.Z, BobbingVCur, DeltaTime, 14.0f);
+		}
+		else
+		{
+			CameraBobTrans.X = FMath::FInterpTo(CameraBobTrans.X, 0.0f, DeltaTime, 12.0f);
+			CameraBobTrans.Z = FMath::FInterpTo(CameraBobTrans.Z, 0.0f, DeltaTime, 12.0f);
+		}
+
+		
+
+		// handle weapon bob which gets blended out on sprint
+		if (!IsSprinting() && FMath::Abs(GetVelocity().Size2D()) >= 30.0f)
+		{
+			const float WP_BobbingHCur = wp_waveslice_cos * -1.0f * WpBobScaleH * (bIsInjured ? WpBobInjuredScale : 1.0f) * (bIsCrouched ? WpBobCrouchModifier : 1.0f) * (bAiming ? WpBobADSModifier : 1.0f);
+			const float WP_BobbingVCur = wp_waveslice * WpBobScaleV * (bIsInjured ? WpBobInjuredScale : 1.0f) * (bIsCrouched ? WpBobCrouchModifier : 1.0f) * (bAiming ? WpBobADSModifier : 1.0f);
+			WeaponBobTrans.X = FMath::FInterpTo(WeaponBobTrans.X, WP_BobbingHCur, DeltaTime, 14.0f);
+			WeaponBobTrans.Z = FMath::FInterpTo(WeaponBobTrans.Z, WP_BobbingVCur, DeltaTime, 14.0f);
+
+			// rotation addition, TODO custom weight properties!
+
+			
+
+			const float WP_BobbingPitch = wp_rot_waveslice * WpBobRotPitchScale * (bIsInjured ? WpBobInjuredScale : 1.0f) * (bIsCrouched ? WpBobRotCrouchModifier : 1.0f) * (bAiming ? WpBobRotADSModifier : 1.0f);
+			const float WP_BobbingRoll = wp_rot_waveslice_cos * -1.0f * WpBobRotRollScale * (bIsInjured ? WpBobInjuredScale : 1.0f) * (bIsCrouched ? WpBobRotCrouchModifier : 1.0f) * (bAiming ? WpBobRotADSModifier : 1.0f);
+
+			WeaponBobRot.Pitch = FMath::FInterpTo(WeaponBobRot.Pitch, WP_BobbingPitch, DeltaTime, 14.0f);
+			WeaponBobRot.Roll = FMath::FInterpTo(WeaponBobRot.Roll, WP_BobbingRoll, DeltaTime, 14.0f);
+		}
+		else
+		{
+			WeaponBobTrans.X = FMath::FInterpTo(WeaponBobTrans.X, 0.0f, DeltaTime, 12.0f);
+			WeaponBobTrans.Z = FMath::FInterpTo(WeaponBobTrans.Z, 0.0f, DeltaTime, 12.0f);
+
+			WeaponBobRot.Pitch = FMath::FInterpTo(WeaponBobRot.Pitch, 0.0f, DeltaTime, 12.0f);
+			WeaponBobRot.Roll = FMath::FInterpTo(WeaponBobRot.Roll, 0.0f, DeltaTime, 12.0f);
+		}
+	}
+}
+
+bool APlayerCharacter::HasSecondarySight()
+{
+	ABaseMagazineWeapon* MagWeapon = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+	if (MagWeapon) {
+		if (MagWeapon->GetScopedAttachment()) {
+			for (int32 i = 0; i < MagWeapon->GetScopedAttachment()->ScopeMods.Num(); i++)
+			{
+				if (MagWeapon->GetScopedAttachment()->GetScopeMods(MagWeapon) == MagWeapon->GetScopedAttachment()->ScopeMods[i])
+				{
+					if (!MagWeapon->GetScopedAttachment()->ScopeMods[i].bSupportsSecondarySights)
+						return false;
+				}
+			}
+
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void APlayerCharacter::ToggleSecondarySight()
+{
+	UE_LOG(LogTemp, Warning, TEXT("Trying to swap sights!"));
+
+	if (HasSecondarySight())
+	{
+		ABaseMagazineWeapon* MagWeapon = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+
+		// swap it
+		if (!bIsSecondarySightActive)
+		{
+			bIsSecondarySightActive = true;
+			MagWeapon->GetScopedAttachment()->bIsSecondarySightActive = true;
+
+			if (MagWeapon->GetScopedAttachment()->bUseScopeEffect)
+			{
+				//MagWeapon->StopScopeMask();
+				bHadScopeMask = true;
+				MagWeapon->GetScopedAttachment()->bUseScopeEffect = false;
+			}
+
+		}
+		else
+		{
+			bIsSecondarySightActive = false;
+			MagWeapon->GetScopedAttachment()->bIsSecondarySightActive = false;
+
+			if (bHadScopeMask)
+			{
+				MagWeapon->GetScopedAttachment()->bUseScopeEffect = true;
+				//MagWeapon->StartScopeMask();
+				bHadScopeMask = false;
+			}
+		}
+
+		OnSecondarySightToggled.Broadcast(bIsSecondarySightActive, MagWeapon);
+	}
+}
+
+void APlayerCharacter::ToggleCantedSight()
+{
+	if (bCantedSightLocked)
+		return;
+
+	bCantedSightEnabled = !bCantedSightEnabled;
+
+	OnCantedSightToggled.Broadcast(bCantedSightEnabled);
+}
+
+void APlayerCharacter::TickTabletLogic(float DeltaSeconds)
+{
+	if (!GetInventoryComponent())
+		return;
+
+	if (UKismetSystemLibrary::IsDedicatedServer(GetWorld()))
+		return;
+	
+	ATablet* Tablet = InventoryComp->GetInventoryItemOfClass_Native<ATablet>(ATablet::StaticClass());
+	if (!Tablet)
+		return;
+	
+	bool bIsTabletEquipped = GetInventoryComponent()->GetEquippedItem<ATablet>() != nullptr;
+	bool bIsEquippingTablet = GetInventoryComponent()->IsEquippingItemOfClass(ATablet::StaticClass());
+	bool bIsEquippingItem = GetInventoryComponent()->IsEquippingItem();
+	
+	// Ensure the tablet is unfocused if it is not equipped or being equipped
+	if (bTabletFocused)
+	{
+		// If we're equipping a different item, start to unfocus
+		if (bIsTabletEquipped && !bIsEquippingTablet && bIsEquippingItem)
+			SetTabletFocused(false);
+
+		// If the tablet is no longer equipped force restore fov shader
+		if (!Tablet->bTabletDrawn && !bIsEquippingTablet && !bIsTabletEquipped)
+			TabletLerp = 0.0f;
+		
+		AddPitch(0.0f);
+		AddYaw(0.0f);
+		MoveForward(0.0f);
+		MoveRight(0.0f);	
+	}
+	else
+	{
+		//bOverrideFov = false;
+	}
+
+	// Wait a second after spawning so we can't spawn face down into the tablet
+	if (bTabletButtonHeld && bStartedFadeIn && GetGameTimeSinceCreation() > 1.0f)
+		TabletFocusTimer += DeltaSeconds;
+	
+	if (TabletFocusTimer >= 0.5f && !bTabletFocused && LowReadyDistance > 30.0f)
+	{
+		bTabletButtonHeld = false;
+		TabletFocusTimer = 0.0f;
+		
+		SetTabletFocused(true);
+	}
+
+	bool bDoFocusLogic = bTabletFocused && (Tablet->bStartedPlayingDraw || bIsTabletEquipped);
+	
+	const float InterpSpeed = Tablet->TabletFocusInterpSpeed;
+	TabletLerp = FMath::FInterpTo(TabletLerp, bDoFocusLogic ? 1.0f : 0.0f, DeltaSeconds, InterpSpeed);
+
+	// Rotate camera to face tablet
+	if (FirstPersonCameraComponent && Tablet)
+	{
+		FRotator Current = FirstPersonCameraComponent->GetRelativeRotation();
+		FRotator Target = !bDoFocusLogic ? FRotator(0.0f, 90.0f, 0.0f) : Tablet->FocusedCameraRotation;
+
+		FRotator NewRotation = FMath::RInterpTo(Current, Target, DeltaSeconds, InterpSpeed);
+		NewRotation = FMath::Lerp(FRotator(0.0f, 90.0f, 0.0f), Tablet->FocusedCameraRotation, TabletLerp);
+		FirstPersonCameraComponent->SetRelativeRotation(NewRotation);
+	}
+
+	if (Tablet)
+	{
+		FRotator Current = Tablet->GetItemMesh()->GetRelativeRotation();
+		FRotator Target = !bDoFocusLogic ? FRotator(0.0f, 0.0f, 0.0f) : Tablet->FocusedItemRotation;
+
+		FRotator NewRotation = FMath::RInterpTo(Current, Target, DeltaSeconds, InterpSpeed);
+		NewRotation = FMath::Lerp(FRotator(0.0f, 0.0f, 0.0f), Tablet->FocusedItemRotation, TabletLerp);
+		Tablet->GetItemMesh()->SetRelativeRotation(NewRotation);
+	}
+
+	// Set camera FOV override
+	if (bOverrideFov && Tablet)
+	{
+		FovOverride = FMath::Lerp(DefaultFoV, Tablet->CalculateTabletFov(), TabletLerp);
+		if (bDoFocusLogic && FMath::IsNearlyEqual(FovOverride, DefaultFoV))
+			bOverrideFov = false;
+	}
+	else
+	{
+		FovOverride = DefaultFoV;
+	}
+	
+	bOverrideMeshWeaponTransform = (bIsTabletEquipped || bIsEquippingTablet) && !bTabletFocused;
+	if (bOverrideMeshWeaponTransform)
+	{
+		FTransform AimingMeshspaceTransform;
+		FTransform DefaultMeshspaceTransform;
+		FTransform BackMeshspaceTransform;
+		Tablet->GetMeshspaceTransform(DefaultMeshspaceTransform, AimingMeshspaceTransform, BackMeshspaceTransform);
+
+		FVector WeaponOffset = DefaultMeshspaceTransform.GetLocation() + FVector(1.0f, 0.0f, 0.0f);
+		FVector2D ReferenceResolution = FVector2D(1920, 1080);
+		
+		UReadyOrNotGameInstance* GameInstance = GetWorld()->GetGameInstance<UReadyOrNotGameInstance>();
+		float CurrentWeaponFov = DefaultFoV;
+		if (GameInstance)
+		{
+			CurrentWeaponFov = UKismetMaterialLibrary::GetScalarParameterValue(GetWorld(), GameInstance->WeaponFOVMaterialCollection, "WeaponFov");
+		}
+		
+		FVector2D CurrentResolution;
+		GetWorld()->GetGameViewport()->GetViewportSize(CurrentResolution);
+		
+		float DefaultFovRadians = FMath::DegreesToRadians(CurrentWeaponFov);
+		float ReferenceFovRadians = FMath::DegreesToRadians(90.0f);
+		
+		// Calculate the current vertical fov and the reference (baseline) vertical fov
+		float ReferenceVerticalFov = 2.0f * FMath::Atan(FMath::Tan(ReferenceFovRadians / 2.0f) * (ReferenceResolution.Y / ReferenceResolution.X));
+		float VerticalFov = 2.0f * FMath::Atan(FMath::Tan(DefaultFovRadians / 2.0f) * (CurrentResolution.Y / CurrentResolution.X));
+		
+		// Grab the default mesh weapon offset and add additional distance to make up for the socket offset from camera
+		FVector2D CameraWeaponSocketOffset = FVector2D(11.17f, 0.0);
+		FVector2D BaseOffset = FVector2D(WeaponOffset.X, -WeaponOffset.Z) + CameraWeaponSocketOffset;
+		
+		// Get the baseline and current angle between camera forward and the bottom of the view
+		float BaseAngle = -ReferenceVerticalFov / 2.0f;
+		float CurrentAngle = -VerticalFov / 2.0f;
+		
+		// Calculate the triangle ratio for the baseline and create a new one based off of it and the fov
+		float BaseRatio = BaseOffset.X / BaseOffset.Y;
+		float NewRatio = (FMath::Sin(BaseAngle) * BaseOffset.Y) / FMath::Sin(CurrentAngle);
+		
+		// Offset to the bottom of the screen with the correct ratio as magnitude
+		FVector2D FinalOffset = FVector2D::ZeroVector;
+		FinalOffset.X = FMath::Cos(CurrentAngle) * NewRatio * BaseRatio;
+		FinalOffset.Y = FMath::Sin(CurrentAngle) * NewRatio;
+		
+		FinalOffset.X = NewRatio * BaseRatio;
+		FinalOffset.Y = FMath::Sin(CurrentAngle) * NewRatio;
+		
+		FinalOffset -= CameraWeaponSocketOffset;
+		
+		FRotator RotationAdjusted = DefaultMeshspaceTransform.GetRotation().Rotator();
+		
+		// Pitch tablet torwards camera so it is more easily visible at higher fov
+		// Additionally move the existing offset to adjust for this rotation
+		FVector TabletScreenBaseOffset = RotationAdjusted.RotateVector(FVector(0.0f, 0.0f, 2.0f));
+		
+		RotationAdjusted.Add(0.0f, 0.0f, -FMath::Abs(FMath::RadiansToDegrees((VerticalFov - ReferenceVerticalFov) / 2.0f)));
+		FVector PostRotationOffset = RotationAdjusted.RotateVector(FVector(0.0f, 0.0f, 2.0f));
+		
+		FVector OffsetAdjusted = FVector(-WeaponOffset.Y, FinalOffset.X, FinalOffset.Y);
+		OffsetAdjusted += PostRotationOffset - TabletScreenBaseOffset;
+		
+		// Create additional distance from the camera at higher game FOV to help mitigate distortion
+		float FovDistortionDepthAdjustment = FMath::Max(0.0f, CurrentWeaponFov - 90) * 0.225f;
+		OffsetAdjusted.Y += FovDistortionDepthAdjustment;
+		OffsetAdjusted.Z += FMath::Sin(CurrentAngle) * FovDistortionDepthAdjustment;
+
+		if (!OffsetAdjusted.ContainsNaN())
+		{
+			MeshWeaponOffset = FMath::VInterpTo(MeshWeaponOffset, OffsetAdjusted, DeltaSeconds, MeshspaceInterp);
+			MeshWeaponRotation = FMath::RInterpTo(MeshWeaponRotation, RotationAdjusted, DeltaSeconds, MeshspaceInterp);
+		}
+		else
+		{
+			MeshWeaponOffset = FMath::VInterpTo(MeshWeaponOffset, FVector(-WeaponOffset.Y, WeaponOffset.X, WeaponOffset.Z), DeltaSeconds, MeshspaceInterp);
+			MeshWeaponRotation = FMath::RInterpTo(MeshWeaponRotation, RotationAdjusted, DeltaSeconds, MeshspaceInterp);
+		}
+	}
+
+	// Setup 1P arms and weapon FOV shader blend
+	float FovBlend = 1.0f - TabletLerp;
+
+	// Custom FOV blending logic, is a little different from normal
+	DesiredDynamicWeaponFoVBlendEffectAmount = FovBlend;
+	if (CurrentDynamicWeaponFoVBlendEffectAmount != DesiredDynamicWeaponFoVBlendEffectAmount)
+	{
+		CurrentDynamicWeaponFoVBlendEffectAmount = DesiredDynamicWeaponFoVBlendEffectAmount;
+		for (int32 i = 0; i < DynamicWeaponFovMats.Num(); i++)
+		{
+			UMaterialInstanceDynamic* DynMat = DynamicWeaponFovMats[i];
+			if (!DynMat)
+				continue;
+
+			DynMat->SetScalarParameterValue("Blend", CurrentDynamicWeaponFoVBlendEffectAmount);
+		}
+	}
+	
+	//ATablet* EquippedTablet = GetEquippedItem<ATablet>();
+	if (Tablet)// && bTabletFocused)
+	{
+		Tablet->SetTabletFocusBlend(FovBlend);
+	}
+}
+
+void APlayerCharacter::OpenTabletPressed()
+{
+	if (bIsSwatCommandOpen)
+		return;
+	
+	bTabletButtonHeld = true;
+	
+	ATablet* Tablet = InventoryComp->GetInventoryItemOfClass_Native<ATablet>(ATablet::StaticClass());
+
+	// Wait a second after spawning so we can't spawn face down into the tablet
+	if (Tablet && !Tablet->bTabletDrawn && bStartedFadeIn && GetGameTimeSinceCreation() > 1.0f)
+	{
+		InventoryComp->PutItemInHands(Tablet);
+		
+		if (HumanCharacterWidget_V2)
+		{
+			HumanCharacterWidget_V2->OnTabletOpen();
+		}
+	}
+}
+
+void APlayerCharacter::OpenTabletReleased()
+{
+	if (bIsSwatCommandOpen)
+		return;
+	
+	bTabletButtonHeld = false;
+	
+	if (TabletFocusTimer > 0.5f)
+	{
+		if (LowReadyDistance < 30.0f)
+		{
+			TabletFocusTimer = 0.0f;
+			return;
+		}
+	}
+	
+	TabletFocusTimer = 0.0f;
+
+	ATablet* Tablet = GetInventoryComponent()->GetInventoryItemOfClass_Native<ATablet>(ATablet::StaticClass());
+	if (Tablet && Tablet->bTabletDrawn)
+	{
+		Tablet->bTabletDrawn = false;
+		InventoryComp->EquipLastEquippedItem();
+		
+		if (HumanCharacterWidget_V2)
+		{
+			HumanCharacterWidget_V2->OnTabletClose();
+		}
+	}
+}
+
+float APlayerCharacter::CalculateTabletFov() const
+{
+	if (!GetWorld() || !GetWorld()->GetGameViewport())
+		return DefaultFoV;
+	
+	const float MinimumHorizontalFov = FMath::DegreesToRadians(44.0f);
+	const float TargetVerticalFov = FMath::DegreesToRadians(21.0f);
+	
+	FVector2D ViewportSize;
+	GetWorld()->GetGameViewport()->GetViewportSize(ViewportSize);
+
+	float VerticalFov = 2.0f * FMath::Atan(FMath::Tan(TargetVerticalFov / 2.0f) * (ViewportSize.X / ViewportSize.Y));
+	float DesiredFov = FMath::Max(VerticalFov, MinimumHorizontalFov);
+
+	return FMath::RadiansToDegrees(DesiredFov);
+}
+
+void APlayerCharacter::OpenBuyMenuPressed()
+{
+	if (ADefusalGS* GameState = GetWorld()->GetGameState<ADefusalGS>())
+	{
+		GameState->OpenBuyMenu(GetRONPlayerController());
+	}
+}
+
+void APlayerCharacter::SetTabletFocused(bool bFocused)
+{
+	UReadyOrNotGameInstance* GameInstance = GetWorld()->GetGameInstance<UReadyOrNotGameInstance>();
+	if (!GameInstance)
+		return;
+	
+	AReadyOrNotPlayerController* PlayerController = GetRONPlayerController();
+	if (!PlayerController)
+		return;
+
+	UInventoryComponent* InventoryComponent = GetInventoryComponent();
+	if (!InventoryComponent)
+		return;
+
+	ATablet* Tablet = InventoryComponent->GetInventoryItemOfClass_Native<ATablet>(ATablet::StaticClass());
+	if (!Tablet)
+		return;
+	
+	bTabletFocused = bFocused;
+	if (bTabletFocused)
+	{
+		// Make sure tablet is in hands
+		InventoryComponent->PutItemInHands(Tablet);
+		
+		FInputModeGameAndUI InputMode;
+		InputMode.SetHideCursorDuringCapture(false);
+		
+		PlayerController->SetInputMode(InputMode);
+		PlayerController->bShowMouseCursor = true;
+		
+		GameInstance->bForceShowMouseCursor = true;
+
+		UGameplayStatics::SetViewportMouseCaptureMode(GetWorld(), EMouseCaptureMode::NoCapture);
+
+		// Make tab navigation go away please
+		FSlateApplication::Get().SetNavigationConfig(MakeShared<FNullNavigationConfig>());
+
+		DisableInput(PlayerController);
+		Tablet->EnableInput(PlayerController);
+		
+		bOverrideFov = true;
+
+		FLevelDataLookupTable LevelData = UBpGameplayHelperLib::GetLevelData(GetWorld());
+		if (const UDataTable* LevelDataTable = UBpGameplayHelperLib::GetLevelLookupDataTable())
+		{
+			FString MapName = GetWorld()->GetMapName();
+			MapName.RemoveFromStart(GetWorld()->StreamingLevelsPrefix);
+			MapName = MapName.ToLower();
+	
+			MapName.ReplaceInline(TEXT("_BarricadedSuspects"), TEXT(""));
+			MapName.ReplaceInline(TEXT("_ActiveShooter"), TEXT(""));
+			MapName.ReplaceInline(TEXT("_BombThreat"), TEXT(""));
+			MapName.ReplaceInline(TEXT("_HostageRescue"), TEXT(""));
+			MapName.ReplaceInline(TEXT("_Raid"), TEXT(""));
+			
+			if (const FLevelDataLookupTable* Data = LevelDataTable->FindRow<FLevelDataLookupTable>(*MapName, "tablet focus"))
+			{
+				if (Data->bUseFixedExposureWhenViewingTablet)
+				{
+					PlayerPostProcessingComp->Settings.bOverride_AutoExposureMinBrightness = true;
+					PlayerPostProcessingComp->Settings.bOverride_AutoExposureMaxBrightness = true;
+					PlayerPostProcessingComp->Settings.AutoExposureMinBrightness = Data->MinEV100;
+					PlayerPostProcessingComp->Settings.AutoExposureMaxBrightness = Data->MaxEV100;
+				}
+				else
+				{
+					PlayerPostProcessingComp->Settings.AutoExposureMinBrightness = PlayerPostProcessingComp->OriginalMinBrightness;
+					PlayerPostProcessingComp->Settings.AutoExposureMaxBrightness = PlayerPostProcessingComp->OriginalMaxBrightness;
+					PlayerPostProcessingComp->Settings.bOverride_AutoExposureMinBrightness = false;
+					PlayerPostProcessingComp->Settings.bOverride_AutoExposureMaxBrightness = false;
+				}
+			}
+		}
+	}
+	else
+	{
+		PlayerController->SetInputMode(FInputModeGameOnly());
+		PlayerController->bShowMouseCursor = false;
+
+		GameInstance->bForceShowMouseCursor = false;
+
+		// Restore standard navigation
+		FSlateApplication::Get().SetNavigationConfig(MakeShared<FNavigationConfig>());
+		
+		EnableInput(PlayerController);
+		Tablet->DisableInput(PlayerController);
+		
+		PlayerPostProcessingComp->Settings.AutoExposureMinBrightness = PlayerPostProcessingComp->OriginalMinBrightness;
+		PlayerPostProcessingComp->Settings.AutoExposureMaxBrightness = PlayerPostProcessingComp->OriginalMaxBrightness;
+		PlayerPostProcessingComp->Settings.bOverride_AutoExposureMinBrightness = false;
+		PlayerPostProcessingComp->Settings.bOverride_AutoExposureMaxBrightness = false;
+	}
+}
+
+bool APlayerCharacter::EquippedWeaponHasLaserAttachment() const
+{
+	ABaseMagazineWeapon* MagWeapon = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+	if (MagWeapon)
+	{
+		return MagWeapon->GetLaserAttachment() != nullptr;
+	}
+
+	return false;
+}
+
+bool APlayerCharacter::EquippedWeaponHasLightAttachment() const
+{
+	ABaseMagazineWeapon* MagWeapon = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+	if (MagWeapon)
+	{
+		return MagWeapon->GetLightAttachment() != nullptr;
+	}
+
+	return false;
+}
+
+bool APlayerCharacter::EquippedWeaponHasSecondarySight() const
+{
+	ABaseMagazineWeapon* MagWeapon = Cast<ABaseMagazineWeapon>(GetEquippedItem());
+	if (MagWeapon)
+	{
+		return MagWeapon->GetScopedAttachment() ? MagWeapon->GetScopedAttachment()->GetScopeMods(MagWeapon).bSupportsSecondarySights : false;
+	}
+
+	return false;
+}
+
+bool APlayerCharacter::HasGrenadesInInventory() const
+{
+	return 	GetInventoryComponent()->GetInventoryItemOfType(EItemCategory::IC_Grenade_Keybind1) != nullptr || GetInventoryComponent()->GetInventoryItemOfType(EItemCategory::IC_Grenade_Keybind2) != nullptr ||
+			GetInventoryComponent()->GetInventoryItemOfType(EItemCategory::IC_Grenade_Keybind3) != nullptr || GetInventoryComponent()->GetInventoryItemOfType(EItemCategory::IC_Grenade_Keybind4) != nullptr ||
+			GetInventoryComponent()->GetInventoryItemOfType(EItemCategory::IC_Grenade) != nullptr;
+}
+
+int32 APlayerCharacter::GetQuickthrowGrenadeAmmo() const
+{
+	if (!QuickThrowItem)
+		return 0;
+	
+	return GetInventoryComponent()->GetInventoryItemsOfClass<ABaseGrenade>(QuickThrowItem->GetClass()).Num();
+}
+
+bool APlayerCharacter::HasChemlightsInInventory() const
+{
+	if (const AChemlight* Chemlight = Cast<AChemlight>(GetInventoryComponent()->GetInventoryItemOfType(EItemCategory::IC_Chemlight)))
+	{
+		return !Chemlight->IsDepleted();
+	}
+	
+	return false;
+}
+
+int32 APlayerCharacter::GetChemlightAmmo() const
+{
+	if (const AChemlight* Chemlight = Cast<AChemlight>(GetInventoryComponent()->GetInventoryItemOfType(EItemCategory::IC_Chemlight)))
+	{
+		return Chemlight->GetRemainingAmmo();
+	}
+	
+	return 0;
+}
+
+void APlayerCharacter::SetCommandInterfaceActive(bool CommandInterfaceActive)
+{
+	bCommandInterfaceActive = CommandInterfaceActive;
+}
+
+void APlayerCharacter::GatherDebugData_Implementation(TArray<FDebugData>& OutDebugData)
+{
+#if !UE_BUILD_SHIPPING
+	OutDebugData.Empty(50);
+
+	FNumberFormattingOptions FloatFormatOptions;
+	FloatFormatOptions.MinimumFractionalDigits = 1;
+	FloatFormatOptions.MaximumFractionalDigits = 1;
+	
+	const FString LocX = "X: " + FText::AsNumber(GetActorLocation().X, &FloatFormatOptions).ToString();
+	const FString LocY = "Y: " + FText::AsNumber(GetActorLocation().Y, &FloatFormatOptions).ToString();
+	const FString LocZ = "Z: " + FText::AsNumber(GetActorLocation().Z, &FloatFormatOptions).ToString();
+	
+	const FString RotX = "R: " + FText::AsNumber(GetActorRotation().Roll, &FloatFormatOptions).ToString();
+	const FString RotY = "P: " + FText::AsNumber(GetActorRotation().Pitch, &FloatFormatOptions).ToString();
+	const FString RotZ = "Y: " + FText::AsNumber(GetActorRotation().Yaw, &FloatFormatOptions).ToString();
+	
+	OutDebugData.Add(FDebugData("Name", GetInventoryComponent()->GetSpawnedGear().Character ? GetInventoryComponent()->GetSpawnedGear().Character->CharacterName : FText::FromString("No Name")));
+	OutDebugData.Add(FDebugData("Team", FText::FromString(ENUM_TO_STRING(ETeamType, GetTeam(), false))));
+	OutDebugData.Add(FDebugData("Health", FText::AsNumber(GetCurrentHealth())));
+	OutDebugData.Add(FDebugData("Health Status", FText::FromString(ENUM_TO_STRING(EPlayerHealthStatus, CharacterHealth->GetHealthStatus(), false))));
+	OutDebugData.Add(FDebugData("Location", FText::FromString("(" + LocX + " " + LocY + " " + LocZ + ")")));
+	OutDebugData.Add(FDebugData("Rotation", FText::FromString("(" + RotX + " " + RotY + " " + RotZ + ")")));
+	OutDebugData.Add(FDebugData("Equipped Item", FText::FromString(GetEquippedItem() ? GetEquippedItem()->GetName() : "None")));
+	OutDebugData.Add(FDebugData("Num Inventory Items", FText::AsNumber(GetInventoryComponent()->GetInventoryItems().Num())));
+	OutDebugData.Add(FDebugData("Primary Weapon", FText::FromString(GetInventoryComponent()->GetSpawnedGear().Primary ? GetInventoryComponent()->GetSpawnedGear().Primary->GetName() : "None")));
+	OutDebugData.Add(FDebugData("Secondary Weapon", FText::FromString(GetInventoryComponent()->GetSpawnedGear().Secondary ? GetInventoryComponent()->GetSpawnedGear().Secondary->GetName() : "None")));
+	OutDebugData.Add(FDebugData("Armor", FText::FromString(GetInventoryComponent()->GetSpawnedGear().Armor ? GetInventoryComponent()->GetSpawnedGear().Armor->GetName() : "None")));
+	OutDebugData.Add(FDebugData("Helmet", FText::FromString(GetInventoryComponent()->GetSpawnedGear().Helmet ? GetInventoryComponent()->GetSpawnedGear().Helmet->GetName() : "None")));
+	OutDebugData.Add(FDebugData("Random Gear", FText::FromString(GetInventoryComponent()->GetSpawnedGear().RandomGear ? GetInventoryComponent()->GetSpawnedGear().RandomGear->GetName() : "None")));
+	OutDebugData.Add(FDebugData("Long Tactical", FText::FromString(GetInventoryComponent()->GetSpawnedGear().LongTactical ? GetInventoryComponent()->GetSpawnedGear().LongTactical->GetName() : "None")));
+	OutDebugData.Add(FDebugData("Grenades ", FText::FromString(FString::FromInt(GetInventoryComponent()->GetSpawnedGear().Grenades.Num()))));
+	OutDebugData.Add(FDebugData("Tactical Devices ", FText::FromString(FString::FromInt(GetInventoryComponent()->GetSpawnedGear().Grenades.Num()))));
+
+	{
+		int32 i = 0;
+		for (ABaseItem* Item : GetInventoryComponent()->GetSpawnedGear().Miscelaneous)
+		{
+			if (Item)
+			{
+				OutDebugData.Add(FDebugData("Misc " + FString::FromInt(i+1), FText::FromString(Item->GetName())));
+				
+				i++;
+			}
+		}
+	}
+#endif
+}
+
+void APlayerCharacter::GatherDebugText_Implementation(FString& OutText)
+{
+	if (GetEquippedItem())
+	{
+		OutText += "\nEquipped Item: " + GetEquippedItem()->GetName();
+	}
+}
+
+void APlayerCharacter::DrawVisualDebug_Implementation()
+{
+}
+
+void APlayerCharacter::StartReviving(APlayerCharacter* PlayerCharacter)
+{
+	if (!PlayerCharacter)
+		return;
+	
+	LOG_CLASS_FUNC
+
+	LockMovement();
+
+	RevivingPlayer = PlayerCharacter;
+	RevivingOperatingTime = 0.0f;
+
+	PlayerCharacter->InteractableComponent->CurrentProgress = 0.0f;
+	PlayerCharacter->BeingRevivedByPlayer = this;
+	PlayerCharacter->LockAllActions();
+}
+
+void APlayerCharacter::StopReviving(APlayerCharacter* PlayerCharacter)
+{
+	if (!PlayerCharacter)
+		return;
+	
+	LOG_CLASS_FUNC
+
+	UnlockMovement();
+
+	RevivingPlayer = nullptr;
+	RevivingOperatingTime = 0.0f;
+
+	PlayerCharacter->InteractableComponent->CurrentProgress = 0.0f;
+	PlayerCharacter->BeingRevivedByPlayer = nullptr;
+	PlayerCharacter->UnlockAllActions();
+}
+
+void APlayerCharacter::OnReviveComplete(APlayerCharacter* PlayerCharacter)
+{
+	if (!PlayerCharacter)
+		return;
+
+	PlayerCharacter->ResetHealth();
+	PlayerCharacter->SetRunSpeed(1.0f);
+	PlayerCharacter->UnlockAllActions();
+
+	StopReviving(PlayerCharacter);
+}
+
+bool APlayerCharacter::CanShowActionPrompt1() const
+{
+	return Super::CanShowActionPrompt1() && !BeingRevivedByPlayer;
+}
+
+bool APlayerCharacter::PlayDeathAnimation()
+{
+	// Currently players shouldn't play any death animations
+	// Cybernetics' death animations are not intended for players and cause crashing issues with the physical anim comp
+	EnableRagdoll();
+	return false;
+
+	// TODO: player death anims
+}
+
+void APlayerCharacter::Multicast_PlayDeathAnimation_Implementation(UAnimMontage* Montage)
+{
+	// TODO: player death anims
+}
+
+void APlayerCharacter::ScreenPositionToWeaponFOV(const FVector2D& ScreenPosition, FVector& WorldPosition, FVector& WorldDirection)
+{
+	WorldPosition = FVector::ZeroVector;
+	WorldDirection = FVector::ZeroVector;
+
+	UReadyOrNotGameInstance* GameInstance = GetWorld()->GetGameInstance<UReadyOrNotGameInstance>();
+	if (!GameInstance)
+		return;
+	
+	APlayerController* PlayerController = Cast<APlayerController>(GetController());
+	if (!PlayerController)
+		return;
+
+	ULocalPlayer* LocalPlayer = PlayerController->GetLocalPlayer();
+	if (!LocalPlayer)
+		return;
+
+	// Get view info
+	FMinimalViewInfo ViewInfo = PlayerController->PlayerCameraManager->GetCameraCachePOV();
+	{
+		PlayerController->GetPlayerViewPoint(ViewInfo.Location, ViewInfo.Rotation);
+	
+		float CurrentWeaponFOV = UKismetMaterialLibrary::GetScalarParameterValue(GetWorld(), GameInstance->WeaponFOVMaterialCollection, "WeaponFov");
+		ViewInfo.FOV = CurrentWeaponFOV;
+		ViewInfo.DesiredFOV = ViewInfo.FOV;
+	}
+	
+	// Calculate view rect 
+	FIntRect UnconstrainedRectangle;
+	{
+		FVector2D Origin = LocalPlayer->Origin;
+		FVector2D Size = LocalPlayer->Size;
+		FViewport* Viewport = LocalPlayer->ViewportClient->Viewport;
+
+		int32 X = FMath::TruncToInt(Origin.X * Viewport->GetSizeXY().X);
+		int32 Y = FMath::TruncToInt(Origin.Y * Viewport->GetSizeXY().Y);
+
+		X += Viewport->GetInitialPositionXY().X;
+		Y += Viewport->GetInitialPositionXY().Y;
+
+		uint32 SizeX = FMath::TruncToInt(Size.X * Viewport->GetSizeXY().X);
+		uint32 SizeY = FMath::TruncToInt(Size.Y * Viewport->GetSizeXY().Y);
+		UnconstrainedRectangle = FIntRect(X, Y, X + SizeX, Y + SizeY);
+	}
+
+	// Deproject into weapon space
+	FSceneViewProjectionData ProjectionData;
+	{
+		ProjectionData.ViewOrigin = ViewInfo.Location;
+		ProjectionData.ViewRotationMatrix = FInverseRotationMatrix(ViewInfo.Rotation) * FMatrix(
+			FPlane(0,	0,	1,	0),
+			FPlane(1,	0,	0,	0),
+			FPlane(0,	1,	0,	0),
+			FPlane(0,	0,	0,	1));
+	
+		ProjectionData.SetViewRectangle(UnconstrainedRectangle);
+
+		FMinimalViewInfo::CalculateProjectionMatrixGivenView(ViewInfo, LocalPlayer->AspectRatioAxisConstraint, LocalPlayer->ViewportClient->Viewport, ProjectionData);
+		FSceneView::DeprojectScreenToWorld(ScreenPosition, UnconstrainedRectangle, ProjectionData.ComputeViewProjectionMatrix().InverseFast(), WorldPosition, WorldDirection);
+	}
+
+	// Offset world position to match shader
+	{
+		float FOV;
+		UBpGameplayHelperLib::GetFoV(FOV);
+		float DeltaFOV = 90.0f - FOV;
+		float Offset = DeltaFOV / 5.0f;
+	
+		WorldPosition += GetFirstPersonCameraComponent()->GetForwardVector() * -Offset;
+	}
+
+	// Add meshspace offset also
+	{
+		ABaseItem* CurrentItem = GetEquippedItem();
+		float Offset = CurrentItem->MeshspaceTransform_Default.GetLocation().Z;
+		WorldPosition += GetFirstPersonCameraComponent()->GetForwardVector() * Offset;
+	}
+	
+	// 1p offset
+	// WorldPosition += GetFirstPersonCameraComponent()->GetForwardVector() * MeshWeaponOffset.Y;
+	// WorldPosition += GetFirstPersonCameraComponent()->GetUpVector() * MeshWeaponOffset.Z;
+	// WorldPosition += GetFirstPersonCameraComponent()->GetRightVector() * MeshWeaponOffset.X;
+}
+
+bool APlayerCharacter::HasTactialEquipped()
+{
+	return InventoryComp->IsItemEquipped(EItemCategory::IC_C2Explosive)
+		|| InventoryComp->IsItemEquipped(EItemCategory::IC_Doorjam)
+		|| InventoryComp->IsItemEquipped(EItemCategory::IC_OCSpray)
+		|| InventoryComp->IsItemEquipped(EItemCategory::IC_LockpickGun);
+}
+
+void APlayerCharacter::EquipCurrentTool()
+{
+	switch (CurrentTool) {
+	case 0:
+		EquipItemOfType(EItemCategory::IC_Zipcuffs);
+		break;
+	case 1:
+		EquipItemOfType(EItemCategory::IC_Multitool);
+		break;
+	case 2:
+		EquipItemOfType(EItemCategory::IC_Detonator);
+		break;
+	default:
+		CurrentTool = 0;
+		EquipItemOfType(EItemCategory::IC_Zipcuffs);
+		break;
+	}
+}
+
+void APlayerCharacter::GamepadTacticalCyclePressed()
+{
+	if (!bCommandInterfaceActive) {
+		bGamepadTacticalCycleActive = true;
+		ABaseItem *Item = EquipItemFromGroup_Index(3, CurrentTactical);
+		if (Item == nullptr && CurrentTactical != 0) {
+			CurrentTactical = 0;
+			EquipItemFromGroup_Index(3, CurrentTactical);
+		}
+	}
+}
+
+void APlayerCharacter::GamepadTacticalCycleReleased()
+{
+	bGamepadTacticalCycleActive = false;
+}
+
+void APlayerCharacter::GamepadAttachmentCyclePressed()
+{
+	if (!bCommandInterfaceActive)
+	{
+		bGamepadAttachmentCycleActive = true;
+		bGamepadAttachmentCycleToggledSafety = false;
+	}
+}
+
+void APlayerCharacter::GamepadAttachmentCycleReleased()
+{
+	if (bGamepadAttachmentCycleActive && !bGamepadAttachmentCycleToggledSafety) {
+		if (AReadyOrNotPlayerController* RONPC = GetRONPlayerController()) {
+			ABaseWeapon *Equipped = static_cast<ABaseWeapon*>(GetEquippedItem());
+			if (EquippedWeaponHasLaserAttachment()) {
+				ULaserAttachment* LaserAttachment = Equipped->GetLaserAttachment();
+				LaserAttachment->ToggleLaser(!LaserAttachment->IsLaserOn());
+			} else if (EquippedWeaponHasLightAttachment()) {
+				ULightAttachment* LightAttachment = Equipped->GetLightAttachment();
+				LightAttachment->ToggleLight(!LightAttachment->IsLightOn());
+			}
+		}
+	}
+	bGamepadAttachmentCycleActive = false;
+}
+
+void APlayerCharacter::GamepadGrenadeCyclePressed()
+{
+	if (!bCommandInterfaceActive && HasGrenadesInInventory()) {
+		bGamepadGrenadeCycleActive = true;
+		if (!UReadyOrNotFunctionLibrary::IsItemEquipped(this, EItemCategory::IC_Grenade)) {
+			ABaseItem *Item = EquipItemFromGroup_Index(2, CurrentGrenade);
+			if (Item == nullptr) {
+				CurrentGrenade = 0;
+				EquipItemFromGroup_Index(2, CurrentGrenade);
+			}
+		}
+	}
+}
+
+void APlayerCharacter::GamepadGrenadeCycleReleased()
+{
+	bGamepadGrenadeCycleActive = false;
+}
+
+void APlayerCharacter::GamepadAimCycle()
+{
+	if (GetEquippedWeapon() != nullptr && !bItemWheelActive && !bCommandInterfaceActive)
+	{
+		if (bIsSecondarySightActive)
+		{
+			ToggleSecondarySight();
+			ToggleCantedSight();
+		}
+		else if (bCantedSightEnabled)
+		{
+			ToggleCantedSight();
+		}
+		else
+		{
+			if (HasSecondarySight())
+			{
+				ToggleSecondarySight(); 
+			}
+			else
+			{
+				ToggleCantedSight(); 
+			}
+		}
+	}
+}
+
+void APlayerCharacter::GamepadWeaponCyclePressed()
+{
+	bGamepadWeaponCycleActive = true;
+	if (!bCommandInterfaceActive) {
+		GetWorldTimerManager().ClearTimer(GamepadReloadTimerHandle);
+		GetWorldTimerManager().SetTimer(GamepadReloadTimerHandle, this, &APlayerCharacter::ExecuteGamepadWeaponCycleLongPress, LongPressDuration, false); 
+	}
+}
+
+void APlayerCharacter::GamepadWeaponCycleReleased()
+{
+	if(!bCommandInterfaceActive && bGamepadWeaponCycleActive)
+	{
+		if (InventoryComp->IsItemEquipped_Class(ABaseWeapon::StaticClass())) {
+			if (InventoryComp->IsItemEquipped(EItemCategory::IC_Primary))
+				EquipSecondaryItem();
+			else
+				EquipPrimaryItem();
+		} else {
+			InventoryComp->EquipLastEquippedWeapon();
+		}
+	}
+	bGamepadWeaponCycleActive = false;
+}
+
+void APlayerCharacter::ExecuteGamepadWeaponCycleLongPress()
+{
+	if (!bCommandInterfaceActive && bGamepadWeaponCycleActive)
+	{
+		EquipLongTactical();
+	}
+	
+	bGamepadWeaponCycleActive = false;
+}
+
+void APlayerCharacter::GamepadToggleCrouchPressed()
+{
+	if (bCommandInterfaceActive)
+		return;
+
+	GetWorldTimerManager().ClearTimer(GamepadCrouchTimerHandle);
+	GetWorldTimerManager().SetTimer(GamepadCrouchTimerHandle, this, &APlayerCharacter::ExecuteGamepadCrouch, LongPressDuration, false); 
+	
+}
+
+void APlayerCharacter::GamepadToggleCrouchReleased()
+{
+	if (GetWorldTimerManager().IsTimerActive(GamepadCrouchTimerHandle))
+	{
+		ToggleLowReady();
+		GetWorldTimerManager().ClearTimer(GamepadCrouchTimerHandle);
+	}
+}
+
+void APlayerCharacter::ExecuteGamepadCrouch()
+{
+	if (!bCommandInterfaceActive)
+	{
+		ToggleCrouch();
+	} 
+}
+
+void APlayerCharacter::GamepadOpenCommandInterfacePressed()
+{
+	if (bItemWheelActive)
+		return;
+	
+	GetWorld()->GetTimerManager().SetTimer(CommandInterfaceTimerHandle, 0.35, false);
+}
+
+void APlayerCharacter::GamepadOpenCommandInterfaceReleased()
+{
+	if (GetWorld()->GetTimerManager().GetTimerRemaining(CommandInterfaceTimerHandle) > 0.0f)
+	{
+		IssueDefaultCommand();	
+	}
+} 
+
+void APlayerCharacter::GamepadCloseCommandInterfacePressed()
+{
+}
+
+void APlayerCharacter::GamepadCloseCommandInterfaceReleased()
+{
+}
+
+// void APlayerCharacter::GamepadTeamViewPressed()
+// {
+// 	if (bCommandInterfaceActive)
+// 	{
+// 		TryNextPlayerView_Pressed();
+// 	}
+// }
+// 
+// void APlayerCharacter::GamepadTeamViewReleased()
+// {
+// 	if (bCommandInterfaceActive)
+// 	{
+// 		TryNextPlayerView_Released();
+// 	}
+// }
+
+void APlayerCharacter::GamepadMeleePressed()
+{
+	if (!bCommandInterfaceActive && !bItemWheelActive && !bCommandWheelActive && bUsingAlternateControls && !bGamepadADSActive)
+	{
+		Melee();
+	}
+}
+
+void APlayerCharacter::GamepadMeleeReleased()
+{ 
+}
+
+void APlayerCharacter::GamepadCycleSwatElementPressed()
+{
+	if (bCommandInterfaceActive)
+	{
+		// CommandInterface->CycleSwatElement(true);
+	}
+}
+
+void APlayerCharacter::GamepadCycleSwatElementReleased()
+{ 
+}
+
+void APlayerCharacter::GamepadCommandInterfaceLeft()
+{
+	if(bCommandWheelActive)
+	{
+		if(HumanCharacterWidget_V2 != nullptr && HumanCharacterWidget_V2->GetCommandWheel() != nullptr)
+		{
+			HumanCharacterWidget_V2->GetCommandWheel()->CycleSwatElement(false);
+		}
+	}
+	else if (bItemWheelActive)
+	{
+	}
+	else
+	{
+		CycleFireMode();
+	}
+}
+
+void APlayerCharacter::GamepadCommandInterfaceRight()
+{
+	if(bCommandWheelActive)
+	{
+		if(HumanCharacterWidget_V2 != nullptr && HumanCharacterWidget_V2->GetCommandWheel() != nullptr)
+		{
+			HumanCharacterWidget_V2->GetCommandWheel()->CycleSwatElement(true);
+		}
+	}
+	else if (bItemWheelActive)
+	{
+	}
+	else
+	{
+		ToggleUnderbarrelAttachment();
+	}
+}
+
+void APlayerCharacter::GamepadCommandInterfaceUpPressed()
+{
+	if(bCommandWheelActive)
+	{
+		TryNextPlayerView_Pressed();
+	}
+	else if (bItemWheelActive)
+	{
+	}
+	else if (!bGamepadADSActive)
+	{
+		ToggleNightvisionGoggles(); 
+	} 
+}
+
+void APlayerCharacter::GamepadCommandInterfaceUpReleased()
+{
+	if(bCommandWheelActive)
+	{
+		TryNextPlayerView_Released();
+	}
+	else if (bItemWheelActive)
+	{
+	}
+	else
+	{
+	} 
+}
+
+void APlayerCharacter::GamepadCommandInterfaceDownPressed()
+{	
+	if(bCommandWheelActive)
+	{
+		if(HumanCharacterWidget_V2 != nullptr && HumanCharacterWidget_V2->GetCommandWheel() != nullptr)
+		{
+			HumanCharacterWidget_V2->GetCommandWheel()->ToggleQueueing();
+		} 
+	}
+	else if (bItemWheelActive)
+	{
+		StartChemThrow();
+	}
+	else
+	{
+		CycleFireMode();
+	}
+}
+
+void APlayerCharacter::GamepadCommandInterfaceDownReleased()
+{
+	if (!bCommandWheelActive && !bItemWheelActive)
+	{
+		EndChemThrow();
+	}
+}
+
+void APlayerCharacter::EndChemThrow()
+{
+}
+
+void APlayerCharacter::GamepadToggleNightvision()
+{
+	if (bCommandInterfaceActive) {
+		ToggleNightvisionGoggles();
+	}
+}
+
+void APlayerCharacter::GamepadADSPressed()
+{
+	if (bToggleADSGamepad && bGamepadADSActive)
+	{
+		bGamepadADSActive = false;
+		//StopLean(); // StopLean here when not ADS anymore
+		if(AReadyOrNotPlayerController* PlayerController = GetRONPlayerController())
+		{
+			PlayerController->SetAimDownSightsAimAssist(false);
+		}
+		EndSecondaryUse();
+	}
+	else
+	{
+		bGamepadADSActive = true;
+		if(AReadyOrNotPlayerController* PlayerController = GetRONPlayerController())
+		{
+			PlayerController->SetAimDownSightsAimAssist(true);
+		}
+		SecondaryUse();
+	}
+}
+
+void APlayerCharacter::GamepadADSReleased()
+{
+	if (!bToggleADSGamepad) 
+	{
+		bGamepadADSActive = false;
+		//StopLean(); // StopLean here when not ADS anymore
+		if(AReadyOrNotPlayerController* PlayerController = GetRONPlayerController())
+		{
+			PlayerController->SetAimDownSightsAimAssist(false);
+		}
+		EndSecondaryUse();
+	}
+}
+
+void APlayerCharacter::GamepadToolCyclePressed()
+{
+	if (bCommandInterfaceActive) {
+		bGamepadToolCycleActive = true;
+		EquipCurrentTool();
+	}
+}
+
+void APlayerCharacter::GamepadToolCycleReleased()
+{
+	bGamepadToolCycleActive = false;
+}
+
+void APlayerCharacter::GamepadReloadPressed()
+{
+	bGamepadReloadActive = true;
+	if (GetWorldTimerManager().IsTimerActive(GamepadReloadTimerHandle))
+	{
+		GetWorldTimerManager().ClearTimer(GamepadReloadTimerHandle);
+		Reload();
+	}
+	else
+	{
+		GetWorldTimerManager().SetTimer(GamepadReloadTimerHandle, this, &APlayerCharacter::ExecuteGamepadReloadLongPress, LongPressDuration, false);
+	} 
+}
+
+void APlayerCharacter::GamepadReloadReleased()
+{
+	bGamepadReloadActive = false;
+}
+
+void APlayerCharacter::ExecuteGamepadReloadLongPress()
+{
+	if (bGamepadReloadActive)
+	{
+		MagCheck();
+	}
+	else
+	{
+		TacticalReload();
+	}
+}
+
+void APlayerCharacter::GamepadAcceptPressed()
+{
+	bGamepadAcceptActive = true;
+	if (bGamepadAcceptActive && bGamepadDeclineActive)
+		UBpGameplayHelperLib::GetLocalRoNPlayerController(GetWorld())->Vote(true);
+}
+
+void APlayerCharacter::GamepadDeclinePressed()
+{
+	bGamepadDeclineActive = true;
+	if (bGamepadAcceptActive && bGamepadDeclineActive)
+		UBpGameplayHelperLib::GetLocalRoNPlayerController(GetWorld())->Vote(true);
+}
+
+void APlayerCharacter::GamepadAcceptReleased()
+{
+	bGamepadAcceptActive = false;
+}
+
+void APlayerCharacter::GamepadDeclineReleased()
+{
+	bGamepadDeclineActive = false;
+}
+
+void APlayerCharacter::GamepadLeanAxis(float Value)
+{
+	if (bGamepadLeanActive) {
+		if (Value > GamepadLeanDeadzone) {
+			if (!bLeanRightToggle) {
+				ToggleLeanRight();
+				LockAim();
+			}
+		} else if (Value < -GamepadLeanDeadzone) {
+			if (!bLeanLeftToggle) {
+				ToggleLeanLeft();
+				LockAim();
+			}
+		}
+	}
+}
+
+void APlayerCharacter::TeleportPlayerToLocation(FVector Location)
+{
+	Server_TeleportPlayerToLocation(Location);
+}
+
+void APlayerCharacter::Server_TeleportPlayerToLocation_Implementation(FVector Location)
+{
+	FVector AdjustedLocation = Location;
+	FRotator AdjustedRotation = GetActorRotation();
+	if (GetWorld()->FindTeleportSpot(this, AdjustedLocation, AdjustedRotation))
+	SetActorLocation(AdjustedLocation);
+}
+
+void APlayerCharacter::Restart()
+{
+	Super::Restart();
+	
+	// On restart (We've been possessed) check if we're overlapping any activity volumes
+	TArray<AActor*> OverlappingActors;
+	GetOverlappingActors(OverlappingActors, TSubclassOf<AActivityTriggerVolume>());
+	for (AActor* Actor : OverlappingActors)
+	{
+		AActivityTriggerVolume* ActivityTriggerVolume = Cast<AActivityTriggerVolume>(Actor);
+		if (!IsValid(ActivityTriggerVolume))
+			continue;
+		
+		ActivityTriggerVolume->OnPlayerRespawned(this);
+	}
+
+	if (IsLocalPlayer())
+	{
+		FVector OriginalLocation = GetMesh()->GetRelativeLocation();
+		GetMesh()->SetRelativeLocation(FVector(-30.0f, 0.0f, OriginalLocation.Z));
+	}
+	
+	OnRep_Customization();
+}
+
+void APlayerCharacter::SetAmmo(const FString& AmmoType)
+{
+	ABaseMagazineWeapon* Weapon = GetEquippedWeapon();
+	if (!Weapon)
+		return;
+
+	FName AmmoTypeName = FName(AmmoType);
+
+	TArray<FName> AmmunitionTypes = Weapon->GetAmmunitionTypes();
+	AmmunitionTypes.Add(AmmoTypeName);
+	
+	TArray<FName> AmmoTypes;
+	AmmoTypes.Init(AmmoTypeName, 5);
+
+	Weapon->SetAmmunitionTypes(AmmunitionTypes);
+	Weapon->SetMagazineCount(AmmoTypes.Num(), AmmoTypes);
+}

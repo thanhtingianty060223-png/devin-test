@@ -1,0 +1,230 @@
+// Copyright Void Interactive, 2023
+
+
+#include "HUD/Widgets/MainMenu_V3.h"
+
+#ifdef WITH_MODIO
+#include "ModioUISubsystem.h"
+#include "ModioUI4Subsystem.h"
+#include "Info/ModioManager.h"
+#include "UI/CommonComponents/ModioMenu.h"
+#endif
+#include "Blueprint/WidgetBlueprintLibrary.h"
+#include "lib/GameFeatureLibrary.h"
+#include "lib/GamepadHelperLib.h"
+
+void UMainMenu_V3::EnableMainMenuInputPreprocessor()
+{
+	if (!MainMenuProcessor)
+	{
+		MainMenuProcessor = MakeShareable(new MainMenuInputPreProcessor());
+	}
+	if (FSlateApplication::Get().FindInputPreProcessor(MainMenuProcessor) == INDEX_NONE)
+	{
+		FSlateApplication::Get().RegisterInputPreProcessor(MainMenuProcessor, 0);
+	}
+}
+
+void UMainMenu_V3::DisableMainMenuInputPreprocessor()
+{
+	if (FSlateApplication::Get().FindInputPreProcessor(MainMenuProcessor) != INDEX_NONE)
+	{
+		FSlateApplication::Get().UnregisterInputPreProcessor(MainMenuProcessor);
+	}
+}
+
+bool UMainMenu_V3::OpenModMenu(APlayerController* PlayerController)
+{
+#ifdef WITH_MODIO
+	UGamepadHelperLib::EnableCommonInputPreprocessing(GetWorld(), false);
+
+	UModioUI4Subsystem* ModioUISubsystem = GEngine->GetEngineSubsystem<UModioUI4Subsystem>();
+	if (!Processor)
+	{
+		Processor = ModioUISubsystem->GetSlatePreprocessor();
+	}
+	if (FSlateApplication::Get().FindInputPreProcessor(Processor) == INDEX_NONE)
+	{
+		FSlateApplication::Get().RegisterInputPreProcessor(Processor);
+	}
+
+	BrowserClosedDelegate.Clear();
+	BrowserClosedDelegate.BindDynamic(this, &UMainMenu_V3::HideModMenu);
+	UModioUISubsystem* ModioSubsystem = GEngine->GetEngineSubsystem<UModioUISubsystem>();
+
+	const FWidgetLookupData WidgetData = UBpGameplayHelperLib::GetWidgetDataFromLookupData("ModioBrowser");
+
+	if (WidgetData.WidgetClass)
+	{
+		UUserWidget* MenuWidget =
+			ModioSubsystem->ShowModBrowserUIForPlayer(WidgetData.WidgetClass, PlayerController, BrowserClosedDelegate);
+		ModioMenu = Cast<UModioMenu>(MenuWidget);
+		if (ModioMenu)
+		{
+			UWidgetBlueprintLibrary::SetInputMode_UIOnlyEx(PlayerController, MenuWidget);
+		}
+		return true;
+	}
+#endif
+	return false;
+}
+
+void UMainMenu_V3::HideModMenu()
+{
+#ifdef WITH_MODIO
+	
+	UModioUISubsystem* ModioUISubsystem = GEngine->GetEngineSubsystem<UModioUISubsystem>();
+	ModioUISubsystem->HideModBrowserUI();
+
+	UModioUI4Subsystem* ModioUI4Subsystem = GEngine->GetEngineSubsystem<UModioUI4Subsystem>();
+	if (!Processor)
+	{
+		Processor = ModioUI4Subsystem->GetSlatePreprocessor();
+	}
+	if (Processor)
+	{
+		FSlateApplication::Get().UnregisterInputPreProcessor(Processor);
+	}
+
+	if (ModioMenu)
+	{
+		ModioMenu->SetShowCursor(true);
+	}
+
+	UGamepadHelperLib::EnableCommonInputPreprocessing(GetWorld(), true);
+
+	OnModMenuClosed();
+#endif
+}
+
+void UMainMenu_V3::CloseModMenu()
+{
+#ifdef WITH_MODIO
+	UModioUISubsystem* ModioUISubsystem = GEngine->GetEngineSubsystem<UModioUISubsystem>();
+	ModioUISubsystem->CloseModBrowserUI();
+#endif
+}
+
+bool UMainMenu_V3::IsLoggedIn() const
+{
+	if (UGameFeatureLibrary::IsGameDemo())
+		return false;
+#if WITH_EDITOR
+	return true;
+#endif
+	if (GetWorld() && GetWorld()->GetGameInstance<UReadyOrNotGameInstance>())
+		return GetWorld()->GetGameInstance<UReadyOrNotGameInstance>()->IsLoggedIntoBackend();
+
+	return false;
+}
+
+bool UMainMenu_V3::CanFindSession(bool bCOOP) const
+{
+	return ((bCOOP && bEnableFindSessionCOOPButton) || (!bCOOP && bEnableFindSessionPVPButton)) && (
+		UBpGameplayHelperLib::IsEditorBuild() || IsLoggedIn());
+}
+
+FText UMainMenu_V3::GetBackEndConnectionStatus(const ELoginState LoginState) const
+{
+	return BackendConnectionStatus[LoginState];
+}
+
+FText UMainMenu_V3::GetPublicLobbyCooldown() const
+{
+	float SecondsRemaining = 0.0f;
+	UBpGameplayHelperLib::IsInPublicLobbyCooldown(SecondsRemaining);
+
+	return FText::Format(NSLOCTEXT("MainMenu", "PublicLobbyCooldown", "Public Lobby Cooldown ({0})"),
+	                     FText::FromString(UBpGameplayHelperLib::ConvertFloatToStringMinutes(SecondsRemaining)));
+}
+
+bool UMainMenu_V3::CanPlayPublicLobby() const
+{
+	if (UGameFeatureLibrary::IsGameDemo())
+		return false;
+
+	float SecondsRemaining = 0.0f;
+	UBpGameplayHelperLib::IsInPublicLobbyCooldown(SecondsRemaining);
+
+	return SecondsRemaining <= 0.0f;
+}
+
+bool UMainMenu_V3::ShouldShowModsButton()
+{
+#ifdef WITH_MODIO
+	return true;
+#endif
+	return false;
+}
+
+bool UMainMenu_V3::IsModUpdating()
+{
+#ifdef WITH_MODIO
+	if (UModioManager::GetInstance() && UModioManager::GetInstance()->IsModUpdating())
+	{
+		return true;
+	}
+#endif
+	return false; 
+}
+
+bool UMainMenu_V3::ShouldShowRestartDialog()
+{
+#ifdef WITH_MODIO
+	if (UModioManager::GetInstance() && UModioManager::GetInstance()->IsRestartRequired())
+	{
+		return true;
+	}
+#endif
+	return false;
+}
+
+void MainMenuInputPreProcessor::Tick(const float DeltaTime, FSlateApplication& SlateApp, TSharedRef<ICursor> Cursor)
+{
+}
+
+bool MainMenuInputPreProcessor::HandleKeyDownEvent(FSlateApplication& SlateApp, const FKeyEvent& InKeyEvent)
+{
+	if (InKeyEvent.GetKey() == EKeys::Gamepad_FaceButton_Bottom)
+	{
+		if (TSharedPtr<FSlateUser> SlateUser = SlateApp.GetUser(GetOwnerUserIndex()))
+		{
+			const TSharedPtr<SWidget> Widget = SlateApp.GetUserFocusedWidget(GetOwnerUserIndex());
+			if (Widget)
+			{
+				FWidgetPath WidgetPath;
+				SlateApp.FindPathToWidget(Widget.ToSharedRef(), WidgetPath);
+				TOptional<FArrangedWidget> ArrangedWidget = WidgetPath.FindArrangedWidget(Widget.ToSharedRef());
+				if (ArrangedWidget.IsSet())
+				{
+					Widget->OnKeyDown(ArrangedWidget->Geometry, InKeyEvent);
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
+bool MainMenuInputPreProcessor::HandleKeyUpEvent(FSlateApplication& SlateApp, const FKeyEvent& InKeyEvent)
+{
+	if (InKeyEvent.GetKey() == EKeys::Gamepad_FaceButton_Bottom)
+	{
+		if (TSharedPtr<FSlateUser> SlateUser = SlateApp.GetUser(GetOwnerUserIndex()))
+		{
+			const TSharedPtr<SWidget> Widget = SlateApp.GetUserFocusedWidget(GetOwnerUserIndex());
+			if (Widget)
+			{
+				FWidgetPath WidgetPath;
+				SlateApp.FindPathToWidget(Widget.ToSharedRef(), WidgetPath);
+				TOptional<FArrangedWidget> ArrangedWidget = WidgetPath.FindArrangedWidget(Widget.ToSharedRef());
+				if (ArrangedWidget.IsSet())
+				{
+					Widget->OnKeyUp(ArrangedWidget->Geometry, InKeyEvent);
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
